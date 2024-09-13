@@ -44,6 +44,7 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
+parser.add_argument("--ffcv", default=False,type=bool, help='Use FFCV to acceletate data loading.')
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
@@ -230,7 +231,14 @@ def main_worker(gpu, ngpus_per_node, args):
                                 weight_decay=args.weight_decay)
         
     scaler = torch.cuda.amp.GradScaler()
-    summary_writer = SummaryWriter() if args.rank == 0 else None
+    import wandb
+    # warn: hard coding 
+    if args.rank == 0:
+        wandb.init(job_type='train',config=args.__dict__,entity='dlib', project="ecl", name="Hydra_moco_IN1K",
+               sync_tensorboard=True,resume=True)
+        summary_writer = SummaryWriter() 
+    else:
+        summary_writer = None
 
     # optionally resume from a checkpoint
     if args.resume:
@@ -284,22 +292,26 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize
     ]
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                      transforms.Compose(augmentation2)))
-
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+    if args.ffcv:
+        pass
     else:
-        train_sampler = None
+        train_dataset = datasets.ImageFolder(
+            traindir,
+            moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                        transforms.Compose(augmentation2)))
 
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+        if args.distributed:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        else:
+            train_sampler = None
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+            num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+    
 
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
+        if args.distributed and not args.ffcv:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
@@ -307,13 +319,23 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank == 0): # only the first GPU saves checkpoint
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'optimizer' : optimizer.state_dict(),
-                'scaler': scaler.state_dict(),
-            }, is_best=False, filename='checkpoint_%04d.pth.tar' % epoch)
+            if (epoch+1) % 50 ==0:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                    'scaler': scaler.state_dict(),
+                }, is_best=False, filename='checkpoint_%04d.pth.tar' % epoch)
+            else:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                    'scaler': scaler.state_dict(),
+                }, is_best=False, filename='checkpoint.pth' % epoch)
+
 
     if args.rank == 0:
         summary_writer.close()
@@ -334,7 +356,7 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
     end = time.time()
     iters_per_epoch = len(train_loader)
     moco_m = args.moco_m
-    for i, (images, _) in enumerate(train_loader):
+    for i, (images, targets) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -347,14 +369,17 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
         if args.gpu is not None:
             images[0] = images[0].cuda(args.gpu, non_blocking=True)
             images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            targets = targets.cuda(args.gpu,non_blocking=True)
 
         # compute output
         with torch.cuda.amp.autocast(True):
-            loss = model(images[0], images[1], moco_m)
+            loss,log = model(images[0], images[1], moco_m, targets=targets)
 
         losses.update(loss.item(), images[0].size(0))
         if args.rank == 0:
             summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
+            for k,v in log.items():
+                summary_writer.add_scalar(k,v, epoch * iters_per_epoch + i)
 
         # compute gradient and do SGD step
         optimizer.zero_grad()

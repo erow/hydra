@@ -6,7 +6,7 @@
 
 import torch
 import torch.nn as nn
-
+from .filter import Filter
 
 class MoCo(nn.Module):
     """
@@ -22,10 +22,11 @@ class MoCo(nn.Module):
         super(MoCo, self).__init__()
 
         self.T = T
-
+        self.num_classes=1000
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
+        self.filter = Filter(1000,dim)
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
 
@@ -47,7 +48,9 @@ class MoCo(nn.Module):
             elif last_bn:
                 # follow SimCLR's design: https://github.com/google-research/simclr/blob/master/model_util.py#L157
                 # for simplicity, we further removed gamma in BN
-                mlp.append(nn.BatchNorm1d(dim2, affine=False))
+                # mlp.append(nn.BatchNorm1d(dim2, affine=False))
+                # BN will prevent gate closing
+                mlp.append(nn.LayerNorm(output_dim)) 
 
         return nn.Sequential(*mlp)
 
@@ -72,7 +75,7 @@ class MoCo(nn.Module):
         labels = (torch.arange(N, dtype=torch.long) + N * torch.distributed.get_rank()).cuda()
         return nn.CrossEntropyLoss()(logits, labels) * (2 * self.T)
 
-    def forward(self, x1, x2, m):
+    def forward(self, x1, x2, m,targets):
         """
         Input:
             x1: first views of images
@@ -82,10 +85,10 @@ class MoCo(nn.Module):
             loss
         """
 
+        self.log = {}
         # compute features
         q1 = self.predictor(self.base_encoder(x1))
         q2 = self.predictor(self.base_encoder(x2))
-
         with torch.no_grad():  # no gradient
             self._update_momentum_encoder(m)  # update the momentum encoder
 
@@ -93,8 +96,41 @@ class MoCo(nn.Module):
             k1 = self.momentum_encoder(x1)
             k2 = self.momentum_encoder(x2)
 
-        return self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
+        instance_loss =  self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
 
+        # disparate contrast
+        shuffle_idx = torch.randperm(len(k1)).to(k1.device)
+        sk1 = k1[shuffle_idx]
+        sk2 = k2[shuffle_idx]
+        y1 = targets.clone()
+        sy = targets[shuffle_idx]
+        disparate_loss = self.disparate_loss(q1,sk1,y1,sy) + self.disparate_loss(q2,sk2,y1,sy)
+        
+        loss  = instance_loss + disparate_loss
+
+        self.log['dis_loss'] = disparate_loss.item()
+        self.log['ins_loss'] = instance_loss.item()
+        return loss, self.log
+    
+    def disparate_loss(self, z1,k2, y1,y2):
+        k2 = concat_all_gather(k2)
+        # z1,k2 = self.norm(z1), self.norm(k2)
+
+        fz1,fz2 = self.filter(z1, k2, y1, y2,log=self.log)
+        
+        scale = 20 # warn, hard coding
+        logits = scale * self.filter.contrast(fz1,fz2)
+
+        label = y1*self.num_classes+y2 # unique label for each pair
+        pos_mask = (label.unsqueeze(1) == concat_all_gather(label).unsqueeze(0))
+        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0))
+        c2_mask = (y2.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0))
+        class_mask = c1_mask|c2_mask
+
+        loss = multipos_ce_loss(logits,pos_mask,class_mask)
+
+        return loss
+    
 
 class MoCo_ResNet(MoCo):
     def _build_projector_and_predictor_mlps(self, dim, mlp_dim):
@@ -135,3 +171,19 @@ def concat_all_gather(tensor):
 
     output = torch.cat(tensors_gather, dim=0)
     return output
+
+
+def multipos_ce_loss(logits, pos_mask,exclude_mask=None):
+    if exclude_mask is None:
+        exclude_mask = pos_mask
+    logits = logits - logits.mean(1,keepdim=True)
+    similarity = logits.exp()
+    N = similarity.size(0)
+ 
+    # InfoNCE loss 
+    ## exclude the positives and class pairs
+    neg = (similarity*(~exclude_mask)).sum(1,keepdim=True)
+    loss = torch.sum(pos_mask* (torch.log(similarity + neg) - logits))/pos_mask.sum()
+    loss = loss.mean()
+   
+    return loss
