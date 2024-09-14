@@ -334,7 +334,7 @@ def main_worker(gpu, ngpus_per_node, args):
                     'state_dict': model.state_dict(),
                     'optimizer' : optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
-                }, is_best=False, filename='checkpoint.pth' % epoch)
+                }, is_best=False, filename='checkpoint.pth')
 
 
     if args.rank == 0:
