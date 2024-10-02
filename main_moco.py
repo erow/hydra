@@ -44,7 +44,8 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
-parser.add_argument("--output_dir", type=str, default="outputs")
+parser.add_argument("--output_dir", type=str, default=None)
+parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffcv","STL"])
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
@@ -52,8 +53,8 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     help='model architecture: ' +
                         ' | '.join(model_names) +
                         ' (default: resnet50)')
-parser.add_argument('-j', '--workers', default=32, type=int, metavar='N',
-                    help='number of data loading workers (default: 32)')
+parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
+                    help='number of data loading workers (default: 10)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
@@ -216,11 +217,11 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         # comment out the following line for debugging
-        raise NotImplementedError("Only DistributedDataParallel is supported.")
+        # raise NotImplementedError("Only DistributedDataParallel is supported.")
     else:
         # AllGather/rank implementation in this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
-    print(model) # print model after SyncBatchNorm
+    # print(model) # print model after SyncBatchNorm
 
     if args.optimizer == 'lars':
         optimizer = moco.optimizer.LARS(model.parameters(), args.lr,
@@ -231,9 +232,9 @@ def main_worker(gpu, ngpus_per_node, args):
                                 weight_decay=args.weight_decay)
         
     scaler = torch.cuda.amp.GradScaler()
-    import wandb
     # warn: hard coding 
-    if args.rank == 0:
+    if args.rank == 0 and args.output_dir:
+        import wandb
         wandb.init(dir=args.output_dir, job_type='train',config=args.__dict__,entity='dlib', project="ecl", name="Hydra_moco_IN1K",
                sync_tensorboard=True,resume=True)
         summary_writer = SummaryWriter() 
@@ -292,12 +293,12 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize
     ]
 
-    if args.ffcv:
+    if (args.data_set =='ffcv'):
         from multiloader import MultiLoader
         import ffcv_transform
         pipelines = ffcv_transform.MultiviewPipeline()
         train_loader = MultiLoader(
-            traindir,
+            args.data,
             batch_size=args.batch_size,
             num_workers=args.workers,
             order=ffcv_transform.OrderOption.RANDOM,
@@ -309,29 +310,37 @@ def main_worker(gpu, ngpus_per_node, args):
         )
         pass
     else:
-        train_dataset = datasets.ImageFolder(
-            traindir,
-            moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                        transforms.Compose(augmentation2)))
+        if (args.data_set =='STL'):
+            train_dataset = datasets.STL10(
+                args.data,
+                split='train',
+                download=True,
+                transform=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                            transforms.Compose(augmentation2)))
+        else:
+            train_dataset = datasets.ImageFolder(
+                traindir,
+                moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                            transforms.Compose(augmentation2)))
 
-    if args.distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-    else:
-        train_sampler = None
-
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
-    
-    os.makedirs(args.output_dir,exist_ok=True)
-    for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
+        else:
+            train_sampler = None
+
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+            num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+    if args.output_dir:
+        os.makedirs(args.output_dir,exist_ok=True)
+    for epoch in range(args.start_epoch, args.epochs):
+        if args.distributed and not (args.data_set =='ffcv'):
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
         train(train_loader, model, optimizer, scaler, summary_writer, epoch, args)
 
-        if not args.multiprocessing_distributed or (args.multiprocessing_distributed
+        if args.output_dir and not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank == 0): # only the first GPU saves checkpoint
             if (epoch+1) % 50 ==0:
                 save_checkpoint({
@@ -370,7 +379,16 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
     end = time.time()
     iters_per_epoch = len(train_loader)
     moco_m = args.moco_m
-    for i, (images, targets) in enumerate(train_loader):
+    for i, batch in enumerate(train_loader):
+        if (args.data_set =='ffcv'):
+            images, targets = batch[:-1], batch[-1]
+            targets = targets.cuda(args.gpu,non_blocking=True)
+        else:
+            images, targets = batch
+            images[0] = images[0].cuda(args.gpu, non_blocking=True)
+            images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            targets = targets.cuda(args.gpu,non_blocking=True)
+            
         # measure data loading time
         data_time.update(time.time() - end)
 
@@ -380,10 +398,7 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
         if args.moco_m_cos:
             moco_m = adjust_moco_momentum(epoch + i / iters_per_epoch, args)
 
-        if args.gpu is not None:
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
-            targets = targets.cuda(args.gpu,non_blocking=True)
+        
 
         # compute output
         with torch.cuda.amp.autocast(True):

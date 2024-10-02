@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import numpy as np
 import torch
 import torch.nn as nn
 from .filter import Filter, ConvFilter
@@ -26,7 +27,7 @@ class MoCo(nn.Module):
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
-        self.filter = ConvFilter(self.num_classes,dim)
+        self.filter = Filter(self.num_classes,dim)
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
 
@@ -49,7 +50,7 @@ class MoCo(nn.Module):
                 # follow SimCLR's design: https://github.com/google-research/simclr/blob/master/model_util.py#L157
                 # for simplicity, we further removed gamma in BN
                 # mlp.append(nn.BatchNorm1d(dim2, affine=False))
-                # BN will prevent gate closing
+                # BN will prevent gate close
                 mlp.append(nn.LayerNorm(output_dim)) 
 
         return nn.Sequential(*mlp)
@@ -86,9 +87,16 @@ class MoCo(nn.Module):
         """
 
         self.log = {}
+        # shuffle trick, compose a positive pair from a random sample of the batch
+        shuffle_idx = torch.randperm(len(x1)).to(x1.device)
+        y = targets.clone()
+        sy = targets[shuffle_idx]
+        gate = self.filter.gate(y)
         # compute features
-        q1 = self.predictor(self.base_encoder(x1))
-        q2 = self.predictor(self.base_encoder(x2))
+        z1 = self.base_encoder(x1)
+        z2 = self.base_encoder(x2)
+        q1 = self.predictor(z1*gate)
+        q2 = self.predictor(z2*gate)
         with torch.no_grad():  # no gradient
             self._update_momentum_encoder(m)  # update the momentum encoder
 
@@ -96,30 +104,26 @@ class MoCo(nn.Module):
             k1 = self.momentum_encoder(x1)
             k2 = self.momentum_encoder(x2)
 
-        instance_loss =  self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
+        # instance_loss =  self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
 
-        # shuffle trick
-        shuffle_idx = torch.randperm(len(k1)).to(k1.device)
-        sk1 = k1[shuffle_idx]
-        sk2 = k2[shuffle_idx]
-        y1 = targets.clone()
-        sy = targets[shuffle_idx]
+        
         # disparate contrast
-        disparate_loss = self.disparate_loss(q1,sk1,x1,x2) + self.disparate_loss(q2,sk2,x1,x2)
+        disparate_loss = (
+            self.disparate_loss(q1,k2[shuffle_idx],y,sy) + 
+            self.disparate_loss(q2,k1[shuffle_idx],y,sy))/2
         #
-        # class_loss = self.class_loss(q1,sk1,y1,sy) + self.class_loss(q2,sk2,y1,sy)
+        # class_loss = (self.class_loss(q1,k2,y,y) + self.class_loss(q2,k1,y,y))/2
         
         loss  =  disparate_loss 
-
-        self.log['dis_loss'] = disparate_loss.item()
-        self.log['ins_loss'] = instance_loss.item()
-        # self.log['cls_loss'] = class_loss.item()
+        C = np.log(len(q1))
+        self.log['dis_loss'] = disparate_loss.item() - C
+        # self.log['ins_loss'] = instance_loss.item() - C
+        # self.log['cls_loss'] = class_loss.item() - C
         return loss, self.log
     
     def disparate_loss(self, z1,k2, y1,y2):
         k2 = concat_all_gather(k2)
-
-        fz1,fz2 = self.filter(z1, k2, log=self.log)
+        fz1,fz2 = self.filter(z1, k2, y1,y2, log=self.log)
         
         scale = 1/self.T
         logits = scale * self.filter.contrast(fz1,fz2)
@@ -130,7 +134,7 @@ class MoCo(nn.Module):
         c2_mask = (y2.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y2
         class_mask = c1_mask|c2_mask
 
-        loss = multipos_ce_loss(logits,pos_mask,class_mask)
+        loss = multipos_ce_loss(logits,class_mask)
         return loss
     
 
@@ -181,6 +185,8 @@ def concat_all_gather(tensor):
     Performs all_gather operation on the provided tensors.
     *** Warning ***: torch.distributed.all_gather has no gradient.
     """
+    if not torch.distributed.is_initialized():
+        return tensor
     tensors_gather = [torch.ones_like(tensor)
         for _ in range(torch.distributed.get_world_size())]
     torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
