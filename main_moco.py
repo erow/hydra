@@ -293,6 +293,20 @@ def main_worker(gpu, ngpus_per_node, args):
     ]
 
     if args.ffcv:
+        from multiloader import MultiLoader
+        import ffcv_transform
+        pipelines = ffcv_transform.MultiviewPipeline()
+        train_loader = MultiLoader(
+            traindir,
+            batch_size=args.batch_size,
+            num_workers=args.workers,
+            order=ffcv_transform.OrderOption.RANDOM,
+            distributed=args.distributed,
+            seed=args.seed,
+            pipelines=pipelines,
+            drop_last=True,
+            batches_ahead=3
+        )
         pass
     else:
         train_dataset = datasets.ImageFolder(
