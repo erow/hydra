@@ -44,7 +44,7 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
-parser.add_argument("--ffcv", default=False,type=bool, help='Use FFCV to acceletate data loading.')
+parser.add_argument("--output_dir", type=str, default="outputs")
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
@@ -78,7 +78,7 @@ parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://224.66.41.62:23456', type=str,
+parser.add_argument('--dist-url', default='tcp://localhost:23456', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
@@ -234,7 +234,7 @@ def main_worker(gpu, ngpus_per_node, args):
     import wandb
     # warn: hard coding 
     if args.rank == 0:
-        wandb.init(job_type='train',config=args.__dict__,entity='dlib', project="ecl", name="Hydra_moco_IN1K",
+        wandb.init(dir=args.output_dir, job_type='train',config=args.__dict__,entity='dlib', project="ecl", name="Hydra_moco_IN1K",
                sync_tensorboard=True,resume=True)
         summary_writer = SummaryWriter() 
     else:
@@ -292,26 +292,24 @@ def main_worker(gpu, ngpus_per_node, args):
         normalize
     ]
 
-    if args.ffcv:
-        pass
+
+    train_dataset = datasets.ImageFolder(
+        traindir,
+        moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                    transforms.Compose(augmentation2)))
+
+    if args.distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
-        train_dataset = datasets.ImageFolder(
-            traindir,
-            moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                        transforms.Compose(augmentation2)))
+        train_sampler = None
 
-        if args.distributed:
-            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        else:
-            train_sampler = None
-
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-            num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
     
-
+    os.makedirs(args.output_dir,exist_ok=True)
     for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed and not args.ffcv:
+        if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
@@ -326,7 +324,7 @@ def main_worker(gpu, ngpus_per_node, args):
                     'state_dict': model.state_dict(),
                     'optimizer' : optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
-                }, is_best=False, filename='checkpoint_%04d.pth.tar' % epoch)
+                }, is_best=False, filename=args.output_dir + 'checkpoint_%04d.pth.tar' % epoch)
             else:
                 save_checkpoint({
                     'epoch': epoch + 1,
@@ -334,7 +332,7 @@ def main_worker(gpu, ngpus_per_node, args):
                     'state_dict': model.state_dict(),
                     'optimizer' : optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
-                }, is_best=False, filename='checkpoint.pth')
+                }, is_best=False, filename=args.output_dir +'checkpoint.pth')
 
 
     if args.rank == 0:

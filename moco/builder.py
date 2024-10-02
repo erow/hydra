@@ -6,7 +6,7 @@
 
 import torch
 import torch.nn as nn
-from .filter import Filter
+from .filter import Filter, ConvFilter
 
 class MoCo(nn.Module):
     """
@@ -26,7 +26,7 @@ class MoCo(nn.Module):
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
-        self.filter = Filter(1000,dim)
+        self.filter = ConvFilter(self.num_classes,dim)
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
 
@@ -98,38 +98,54 @@ class MoCo(nn.Module):
 
         instance_loss =  self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
 
-        # disparate contrast
+        # shuffle trick
         shuffle_idx = torch.randperm(len(k1)).to(k1.device)
         sk1 = k1[shuffle_idx]
         sk2 = k2[shuffle_idx]
         y1 = targets.clone()
         sy = targets[shuffle_idx]
-        disparate_loss = self.disparate_loss(q1,sk1,y1,sy) + self.disparate_loss(q2,sk2,y1,sy)
+        # disparate contrast
+        disparate_loss = self.disparate_loss(q1,sk1,x1,x2) + self.disparate_loss(q2,sk2,x1,x2)
+        #
+        # class_loss = self.class_loss(q1,sk1,y1,sy) + self.class_loss(q2,sk2,y1,sy)
         
-        loss  = instance_loss + disparate_loss
+        loss  =  disparate_loss 
 
         self.log['dis_loss'] = disparate_loss.item()
         self.log['ins_loss'] = instance_loss.item()
+        # self.log['cls_loss'] = class_loss.item()
         return loss, self.log
     
     def disparate_loss(self, z1,k2, y1,y2):
         k2 = concat_all_gather(k2)
-        # z1,k2 = self.norm(z1), self.norm(k2)
 
-        fz1,fz2 = self.filter(z1, k2, y1, y2,log=self.log)
+        fz1,fz2 = self.filter(z1, k2, log=self.log)
         
-        scale = 20 # warn, hard coding
+        scale = 1/self.T
         logits = scale * self.filter.contrast(fz1,fz2)
 
         label = y1*self.num_classes+y2 # unique label for each pair
         pos_mask = (label.unsqueeze(1) == concat_all_gather(label).unsqueeze(0))
-        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0))
-        c2_mask = (y2.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0))
+        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y1
+        c2_mask = (y2.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y2
         class_mask = c1_mask|c2_mask
 
         loss = multipos_ce_loss(logits,pos_mask,class_mask)
-
         return loss
+    
+
+    def class_loss(self,z1,k2,y1,y2):
+        k2 = concat_all_gather(k2)
+
+        fz1,fz2 = self.filter(z1, k2, y1,log=self.log)
+
+        scale = 1/self.T
+        logits = scale * self.filter.contrast(fz1,fz2)
+
+        pos_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y1
+        loss = multipos_ce_loss(logits,pos_mask,pos_mask)
+        return loss
+
     
 
 class MoCo_ResNet(MoCo):

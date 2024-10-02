@@ -163,3 +163,57 @@ class Filter(nn.Module):
     def contrast(self,x1,x2):
         logits =  torch.einsum("bj,bnj->bn",x1,x2)
         return logits
+
+from timm.models.convnext  import convnextv2_atto
+class VisionGate(nn.Module):
+    def __init__(self, embed_dim, in_dim=512, mlp_dim=1024,
+                 lam = 0, fuse=True):
+        super().__init__()
+        
+        self.mlp = nn.Sequential(
+            nn.ReLU(), nn.BatchNorm1d(in_dim),
+            nn.Linear(in_dim, mlp_dim),
+            nn.ReLU(), nn.BatchNorm1d(mlp_dim),
+            nn.Linear(mlp_dim, embed_dim),            
+        )
+        self.label_embedding = convnextv2_atto(num_classes=embed_dim)
+        self.lam = lam
+        self.fuse = fuse
+    
+    def forward(self,y1,y2=None,log=None):
+        if y2 is None:
+            label_embeds = self.label_embedding(y1)
+        else:
+            label_embeds = (self.label_embedding(y1) + self.label_embedding(y2))/2
+        
+        logits = self.mlp(label_embeds)
+        gate = logits.sigmoid()
+
+        if not log is None:
+            p = gate.detach()
+            dist = torch.distributions.Bernoulli(p)
+            entropy = dist.entropy()
+            log['entropy'] = entropy.mean().item()
+            open = (gate>0.5).float()
+            log['activation']=(open.sum(0)>20).float().sum().item()
+            
+        return gate
+    
+class ConvFilter(nn.Module):
+    def __init__(self,num_classes, embed_dim):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.gate = VisionGate(embed_dim)
+        
+
+    def forward(self, x1,x2, log=None):
+        gate = self.gate(x1,x2,log=log)
+        x1 = torch.einsum("bk,bk->bk",x1,gate)
+        x2 = torch.einsum("nk,bk->bnk",x2,gate)
+        x1 =  F.normalize(x1,p=2,dim=-1)
+        x2 =  F.normalize(x2,p=2,dim=-1)
+        return x1, x2
+    
+    def contrast(self,x1,x2):
+        logits =  torch.einsum("bj,bnj->bn",x1,x2)
+        return logits
