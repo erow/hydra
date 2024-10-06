@@ -6,15 +6,18 @@
 
 import numpy as np
 import torch
+import torch.distributed
 import torch.nn as nn
 from .filter import Filter, ConvFilter
+import gin
 
+@gin.configurable()
 class MoCo(nn.Module):
     """
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0):
+    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0,alpha=1.0,beta=0.0):
         """
         dim: feature dimension (default: 256)
         mlp_dim: hidden dimension in MLPs (default: 4096)
@@ -23,6 +26,8 @@ class MoCo(nn.Module):
         super(MoCo, self).__init__()
 
         self.T = T
+        self.alpha=alpha
+        self.beta = beta
         self.num_classes=1000
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
@@ -34,7 +39,11 @@ class MoCo(nn.Module):
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
             param_m.requires_grad = False  # not update by gradient
-
+    
+    @torch.no_grad()
+    def representation(self, x):
+        return self.momentum_encoder(x)
+    
     def _build_mlp(self, num_layers, input_dim, mlp_dim, output_dim, last_bn=True):
         mlp = []
         for l in range(num_layers):
@@ -73,8 +82,9 @@ class MoCo(nn.Module):
         # Einstein sum is more intuitive
         logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
         N = logits.shape[0]  # batch size per GPU
-        labels = (torch.arange(N, dtype=torch.long) + N * torch.distributed.get_rank()).cuda()
-        return nn.CrossEntropyLoss()(logits, labels) * (2 * self.T)
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        labels = (torch.arange(N, dtype=torch.long) + N * rank).cuda()
+        return nn.CrossEntropyLoss()(logits, labels)
 
     def forward(self, x1, x2, m,targets):
         """
@@ -91,12 +101,12 @@ class MoCo(nn.Module):
         shuffle_idx = torch.randperm(len(x1)).to(x1.device)
         y = targets.clone()
         sy = targets[shuffle_idx]
-        gate = self.filter.gate(y)
+        # gate = self.filter.gate(y)
         # compute features
         z1 = self.base_encoder(x1)
         z2 = self.base_encoder(x2)
-        q1 = self.predictor(z1*gate)
-        q2 = self.predictor(z2*gate)
+        q1 = self.predictor(z1)
+        q2 = self.predictor(z2)
         with torch.no_grad():  # no gradient
             self._update_momentum_encoder(m)  # update the momentum encoder
 
@@ -104,21 +114,26 @@ class MoCo(nn.Module):
             k1 = self.momentum_encoder(x1)
             k2 = self.momentum_encoder(x2)
 
-        # instance_loss =  self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1)
+        instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
 
+        # filter the features to query
+        # gate = self.filter.gate(y,sy)
+        # fq1 = self.predictor(z1*gate)
+        # fq2 = self.predictor(z2*gate)
         
         # disparate contrast
         disparate_loss = (
             self.disparate_loss(q1,k2[shuffle_idx],y,sy) + 
             self.disparate_loss(q2,k1[shuffle_idx],y,sy))/2
         #
-        # class_loss = (self.class_loss(q1,k2,y,y) + self.class_loss(q2,k1,y,y))/2
+        class_loss = (self.class_loss(q1,k2[shuffle_idx],y,sy) + 
+                      self.class_loss(q2,k1[shuffle_idx],y,sy))/2
         
-        loss  =  disparate_loss 
-        C = np.log(len(q1))
-        self.log['dis_loss'] = disparate_loss.item() - C
-        # self.log['ins_loss'] = instance_loss.item() - C
-        # self.log['cls_loss'] = class_loss.item() - C
+        loss  =  disparate_loss + instance_loss * self.alpha + class_loss * self.beta
+        C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
+        self.log['dis'] = C - disparate_loss.item() 
+        self.log['ins'] = C - instance_loss.item() 
+        self.log['cls'] = C - class_loss.item() 
         return loss, self.log
     
     def disparate_loss(self, z1,k2, y1,y2):
@@ -134,7 +149,7 @@ class MoCo(nn.Module):
         c2_mask = (y2.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y2
         class_mask = c1_mask|c2_mask
 
-        loss = multipos_ce_loss(logits,class_mask)
+        loss = multipos_ce_loss(logits, class_mask)
         return loss
     
 

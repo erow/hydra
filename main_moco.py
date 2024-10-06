@@ -8,6 +8,7 @@
 
 import argparse
 import builtins
+import gin
 import math
 import os
 import random
@@ -16,6 +17,7 @@ import time
 import warnings
 from functools import partial
 
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -29,6 +31,9 @@ import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as torchvision_models
 from torch.utils.tensorboard import SummaryWriter
+import wandb
+from multiloader import MultiLoader
+import ffcv_transform
 
 import moco.builder
 import moco.loader
@@ -46,6 +51,7 @@ model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + tor
 parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
 parser.add_argument("--output_dir", type=str, default=None)
 parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffcv","STL"])
+parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
@@ -118,10 +124,11 @@ parser.add_argument('--warmup-epochs', default=10, type=int, metavar='N',
                     help='number of warmup epochs')
 parser.add_argument('--crop-min', default=0.08, type=float,
                     help='minimum scale for random cropping (default: 0.08)')
-
+parser.add_argument('--gin', default=[], type=str, nargs='+', help='gin bindings')
 
 def main():
     args = parser.parse_args()
+    gin.parse_config(args.gin)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -177,6 +184,9 @@ def main_worker(gpu, ngpus_per_node, args):
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
         torch.distributed.barrier()
+    
+    if args.output_dir:
+        os.makedirs(args.output_dir,exist_ok=True)
     # create model
     print("=> creating model '{}'".format(args.arch))
     if args.arch.startswith('vit'):
@@ -233,11 +243,12 @@ def main_worker(gpu, ngpus_per_node, args):
         
     scaler = torch.cuda.amp.GradScaler()
     # warn: hard coding 
-    if args.rank == 0 and args.output_dir:
+    if (args.rank == 0 or not args.multiprocessing_distributed) and args.output_dir:
         import wandb
-        wandb.init(dir=args.output_dir, job_type='train',config=args.__dict__,entity='dlib', project="ecl", name="Hydra_moco_IN1K",
-               sync_tensorboard=True,resume=True)
-        summary_writer = SummaryWriter() 
+        wandb.init(dir=args.output_dir, job_type='train',config=args.__dict__,
+                   entity='dlib', project="hydra",
+               sync_tensorboard=True,resume=args.resume is not None)
+        summary_writer = SummaryWriter(args.output_dir) 
     else:
         summary_writer = None
 
@@ -269,7 +280,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
     augmentation1 = [
-        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
+        transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
         transforms.RandomApply([
             transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
         ], p=0.8),
@@ -281,7 +292,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ]
 
     augmentation2 = [
-        transforms.RandomResizedCrop(224, scale=(args.crop_min, 1.)),
+        transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
         transforms.RandomApply([
             transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
         ], p=0.8),
@@ -294,8 +305,6 @@ def main_worker(gpu, ngpus_per_node, args):
     ]
 
     if (args.data_set =='ffcv'):
-        from multiloader import MultiLoader
-        import ffcv_transform
         pipelines = ffcv_transform.MultiviewPipeline()
         train_loader = MultiLoader(
             args.data,
@@ -331,8 +340,6 @@ def main_worker(gpu, ngpus_per_node, args):
         train_loader = torch.utils.data.DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
             num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
-    if args.output_dir:
-        os.makedirs(args.output_dir,exist_ok=True)
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed and not (args.data_set =='ffcv'):
             train_sampler.set_epoch(epoch)
@@ -340,8 +347,8 @@ def main_worker(gpu, ngpus_per_node, args):
         # train for one epoch
         train(train_loader, model, optimizer, scaler, summary_writer, epoch, args)
 
-        if args.output_dir and not args.multiprocessing_distributed or (args.multiprocessing_distributed
-                and args.rank == 0): # only the first GPU saves checkpoint
+        if args.output_dir and (not args.multiprocessing_distributed or (
+            args.multiprocessing_distributed and args.rank == 0)): # only the first GPU saves checkpoint
             if (epoch+1) % 50 ==0:
                 save_checkpoint({
                     'epoch': epoch + 1,
@@ -349,19 +356,90 @@ def main_worker(gpu, ngpus_per_node, args):
                     'state_dict': model.state_dict(),
                     'optimizer' : optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
-                }, is_best=False, filename=args.output_dir + 'checkpoint_%04d.pth.tar' % epoch)
-            else:
-                save_checkpoint({
+                }, is_best=False, filename=args.output_dir + '/checkpoint_%04d.pth.tar' % epoch)
+            # else:
+            #     save_checkpoint({
+            #         'epoch': epoch + 1,
+            #         'arch': args.arch,
+            #         'state_dict': model.state_dict(),
+            #         'optimizer' : optimizer.state_dict(),
+            #         'scaler': scaler.state_dict(),
+            #     }, is_best=False, filename=args.output_dir +'/checkpoint.pth')
+        
+        if (not args.multiprocessing_distributed or (
+            args.multiprocessing_distributed and args.rank == 0)) and epoch%20==0 and args.data_set == 'STL':
+            model.eval()
+            evaluate(model, args, epoch)
+            model.train()
+
+    if args.rank == 0:
+        save_checkpoint({
                     'epoch': epoch + 1,
                     'arch': args.arch,
                     'state_dict': model.state_dict(),
                     'optimizer' : optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
-                }, is_best=False, filename=args.output_dir +'checkpoint.pth')
-
-
-    if args.rank == 0:
+                }, is_best=False, filename=args.output_dir +'/checkpoint.pth')
         summary_writer.close()
+
+stl_val_loader = None
+stl_train_loader = None
+def evaluate(model, args,  epoch):
+    # evaluate    
+    global stl_val_loader
+    global stl_train_loader
+    from sklearn.metrics import classification_report
+    from vitookit.evaluation.eval_knn import _knn_classifier,ReturnIndexDatasetWrap
+    if stl_val_loader is None:
+        val_dataset = datasets.STL10(
+            args.data,
+            split='test',
+            download=True,
+            transform=transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]))
+        train_dataset = datasets.STL10(
+            args.data,
+            split='train',
+            download=True,
+            transform=transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]))
+
+        stl_val_loader = torch.utils.data.DataLoader(
+            (val_dataset), batch_size=args.batch_size, shuffle=False,
+            num_workers=args.workers, pin_memory=True)
+        
+        stl_train_loader = torch.utils.data.DataLoader(
+            (train_dataset), batch_size=args.batch_size, shuffle=False,
+            num_workers=args.workers, pin_memory=True)
+    
+    
+    train_features,train_labels = extract_features(model.representation, stl_train_loader)
+    test_features,test_labels = extract_features(model.representation, stl_val_loader)
+    
+    prediction = []
+    targets = []
+    for predict,target in _knn_classifier(train_features,train_labels,test_features,test_labels,
+                                          k=5,T=0.07,num_classes=10):
+        prediction.append(predict[:,0])
+        targets.append(target)
+    predict = torch.cat(prediction).cpu().numpy()
+    test_labels = torch.cat(targets).cpu().numpy()
+    
+    report = classification_report(test_labels, predict, output_dict=True)
+    report = pd.DataFrame(report)
+    print(report)
+    if wandb.run:
+        table = wandb.Table(data=report,columns=report.columns)
+        wandb.log({"report":table},step=epoch)
+
 
 def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -405,8 +483,9 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             loss,log = model(images[0], images[1], moco_m, targets=targets)
 
         losses.update(loss.item(), images[0].size(0))
-        if args.rank == 0:
+        if args.rank == 0 or not args.multiprocessing_distributed:
             summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
+            summary_writer.add_scalar("lr", lr, epoch * iters_per_epoch + i)
             for k,v in log.items():
                 summary_writer.add_scalar(k,v, epoch * iters_per_epoch + i)
 
@@ -487,6 +566,17 @@ def adjust_moco_momentum(epoch, args):
     m = 1. - 0.5 * (1. + math.cos(math.pi * epoch / args.epochs)) * (1. - args.moco_m)
     return m
 
+def extract_features(model, data_loader, device='cuda'):
+    features = []
+    labels = []
+    with torch.no_grad():
+        for i, (images, target) in enumerate(data_loader):
+            images = images.to(device)
+            target = target.to(device)
+            output = model(images)
+            features.append(output)
+            labels.append(target)
+    return torch.cat(features), torch.cat(labels)
 
 if __name__ == '__main__':
     main()
