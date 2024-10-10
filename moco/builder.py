@@ -115,19 +115,14 @@ class MoCo(nn.Module):
             k2 = self.momentum_encoder(x2)
 
         instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
-
-        # filter the features to query
-        # gate = self.filter.gate(y,sy)
-        # fq1 = self.predictor(z1*gate)
-        # fq2 = self.predictor(z2*gate)
         
         # disparate contrast
         disparate_loss = (
-            self.disparate_loss(q1,k2[shuffle_idx],y,sy) + 
-            self.disparate_loss(q2,k1[shuffle_idx],y,sy))/2
+            self.disparate_loss(q1,k2,y,y,sy) + 
+            self.disparate_loss(q2,k1,y,y,sy))/2
         #
-        class_loss = (self.class_loss(q1,k2[shuffle_idx],y,sy) + 
-                      self.class_loss(q2,k1[shuffle_idx],y,sy))/2
+        class_loss = (self.disparate_loss(q1,k2,y,y,y) + 
+                      self.disparate_loss(q2,k1,y,y,y))/2
         
         loss  =  disparate_loss + instance_loss * self.alpha + class_loss * self.beta
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
@@ -136,20 +131,19 @@ class MoCo(nn.Module):
         self.log['cls'] = C - class_loss.item() 
         return loss, self.log
     
-    def disparate_loss(self, z1,k2, y1,y2):
+    def disparate_loss(self, z1,k2, y1,y2, posy):
         k2 = concat_all_gather(k2)
         fz1,fz2 = self.filter(z1, k2, y1,y2, log=self.log)
         
         scale = 1/self.T
         logits = scale * self.filter.contrast(fz1,fz2)
-
-        label = y1*self.num_classes+y2 # unique label for each pair
-        pos_mask = (label.unsqueeze(1) == concat_all_gather(label).unsqueeze(0))
-        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y1
-        c2_mask = (y2.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y2
+        
+        
+        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude samples from y1
+        c2_mask = (posy.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude samples from y2
         class_mask = c1_mask|c2_mask
 
-        loss = multipos_ce_loss(logits, class_mask)
+        loss = multipos_ce_loss(logits,class_mask,class_mask)
         return loss
     
 

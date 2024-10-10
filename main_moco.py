@@ -38,6 +38,7 @@ import ffcv_transform
 import moco.builder
 import moco.loader
 import moco.optimizer
+import datetime 
 
 import vits
 
@@ -85,7 +86,7 @@ parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
-parser.add_argument('--dist-url', default='tcp://localhost:23456', type=str,
+parser.add_argument('--dist-url', default='env://', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
                     help='distributed backend')
@@ -140,16 +141,29 @@ def main():
                       'You may see unexpected behavior when restarting '
                       'from checkpoints.')
 
+    args.rank = int(os.environ["RANK"])
+    args.world_size = int(os.environ['WORLD_SIZE'])
+    args.gpu = int(os.environ['LOCAL_RANK'])
+
     if args.gpu is not None:
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
 
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
+    args.distributed = True
+    torch.cuda.set_device(args.gpu)
+    args.dist_backend = 'nccl'
 
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+    torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+                                         world_size=args.world_size, rank=args.rank)
+    torch.distributed.barrier()
+    setup_for_distributed(args.rank == 0)
+    args.multiprocessing_distributed = True
+    ngpus_per_node = torch.distributed.get_world_size()
+    return main_worker(args.gpu, ngpus_per_node, args)
+
 
     ngpus_per_node = torch.cuda.device_count()
+    
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
         # needs to be adjusted accordingly
@@ -166,24 +180,24 @@ def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
 
     # suppress printing if not first GPU on each node
-    if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
-        def print_pass(*args):
-            pass
-        builtins.print = print_pass
+    # if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
+    #     def print_pass(*args):
+    #         pass
+    #     builtins.print = print_pass
 
-    if args.gpu is not None:
-        print("Use GPU: {} for training".format(args.gpu))
+    # if args.gpu is not None:
+    #     print("Use GPU: {} for training".format(args.gpu))
 
-    if args.distributed:
-        if args.dist_url == "env://" and args.rank == -1:
-            args.rank = int(os.environ["RANK"])
-        if args.multiprocessing_distributed:
-            # For multiprocessing distributed training, rank needs to be the
-            # global rank among all the processes
-            args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                world_size=args.world_size, rank=args.rank)
-        torch.distributed.barrier()
+    # if args.distributed:
+    #     if args.dist_url == "env://" and args.rank == -1:
+    #         args.rank = int(os.environ["RANK"])
+    #     if args.multiprocessing_distributed:
+    #         # For multiprocessing distributed training, rank needs to be the
+    #         # global rank among all the processes
+    #         args.rank = args.rank * ngpus_per_node + gpu
+    #     dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
+    #                             world_size=args.world_size, rank=args.rank)
+    #     torch.distributed.barrier()
     
     if args.output_dir:
         os.makedirs(args.output_dir,exist_ok=True)
@@ -483,7 +497,8 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             loss,log = model(images[0], images[1], moco_m, targets=targets)
 
         losses.update(loss.item(), images[0].size(0))
-        if args.rank == 0 or not args.multiprocessing_distributed:
+        if (args.rank == 0 or not args.multiprocessing_distributed) and summary_writer:
+            
             summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
             summary_writer.add_scalar("lr", lr, epoch * iters_per_epoch + i)
             for k,v in log.items():
@@ -577,6 +592,21 @@ def extract_features(model, data_loader, device='cuda'):
             features.append(output)
             labels.append(target)
     return torch.cat(features), torch.cat(labels)
+
+
+def setup_for_distributed(is_master):
+    """
+    This function disables printing when not in master process
+    """
+    builtin_print = builtins.print
+
+    def print(*args, **kwargs):
+        force = kwargs.pop('force', False)
+        if is_master or force:
+            now = datetime.datetime.now().time()
+            builtin_print('[{}] '.format(now), *args, **kwargs)  # print with time stamp
+
+    builtins.print = print
 
 if __name__ == '__main__':
     main()
