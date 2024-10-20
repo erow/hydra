@@ -371,14 +371,14 @@ def main_worker(gpu, ngpus_per_node, args):
                     'optimizer' : optimizer.state_dict(),
                     'scaler': scaler.state_dict(),
                 }, is_best=False, filename=args.output_dir + '/checkpoint_%04d.pth.tar' % epoch)
-            # else:
-            #     save_checkpoint({
-            #         'epoch': epoch + 1,
-            #         'arch': args.arch,
-            #         'state_dict': model.state_dict(),
-            #         'optimizer' : optimizer.state_dict(),
-            #         'scaler': scaler.state_dict(),
-            #     }, is_best=False, filename=args.output_dir +'/checkpoint.pth')
+            else:
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'optimizer' : optimizer.state_dict(),
+                    'scaler': scaler.state_dict(),
+                }, is_best=False, filename=args.output_dir +'/checkpoint.pth')
         
         if (not args.multiprocessing_distributed or (
             args.multiprocessing_distributed and args.rank == 0)) and epoch%20==0 and args.data_set == 'STL':

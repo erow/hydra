@@ -15,6 +15,7 @@ from timm.models.layers import to_2tuple
 from timm.models.layers import PatchEmbed
 
 __all__ = [
+    'vit_tiny',
     'vit_small', 
     'vit_base',
     'vit_conv_small',
@@ -112,6 +113,12 @@ class ConvStem(nn.Module):
         x = self.norm(x)
         return x
 
+def vit_tiny(**kwargs):
+    model = VisionTransformerMoCo(
+        patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    return model
 
 def vit_small(**kwargs):
     model = VisionTransformerMoCo(

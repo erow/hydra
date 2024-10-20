@@ -17,7 +17,7 @@ class MoCo(nn.Module):
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0,alpha=1.0,beta=0.0):
+    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0,alpha=0,beta=0.0):
         """
         dim: feature dimension (default: 256)
         mlp_dim: hidden dimension in MLPs (default: 4096)
@@ -100,7 +100,7 @@ class MoCo(nn.Module):
         # shuffle trick, compose a positive pair from a random sample of the batch
         shuffle_idx = torch.randperm(len(x1)).to(x1.device)
         y = targets.clone()
-        sy = targets[shuffle_idx]
+        sy = targets[shuffle_idx].contiguous()
         # gate = self.filter.gate(y)
         # compute features
         z1 = self.base_encoder(x1)
@@ -118,32 +118,34 @@ class MoCo(nn.Module):
         
         # disparate contrast
         disparate_loss = (
-            self.disparate_loss(q1,k2,y,y,sy) + 
-            self.disparate_loss(q2,k1,y,y,sy))/2
+            self.disparate_loss(q1,k2,y,sy) + 
+            self.disparate_loss(q2,k1,y,sy))/2
         #
-        class_loss = (self.disparate_loss(q1,k2,y,y,y) + 
-                      self.disparate_loss(q2,k1,y,y,y))/2
+        class_loss = (self.disparate_loss(q1,k2,y,y) + 
+                      self.disparate_loss(q2,k1,y,y))/2
         
         loss  =  disparate_loss + instance_loss * self.alpha + class_loss * self.beta
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
-        self.log['dis'] = C - disparate_loss.item() 
-        self.log['ins'] = C - instance_loss.item() 
-        self.log['cls'] = C - class_loss.item() 
+        with torch.no_grad():
+            self.log['dis'] = C - disparate_loss.item() 
+            self.log['ins'] = C - instance_loss.item() 
+            self.log['cls'] = C - class_loss.item() 
+            self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         return loss, self.log
     
-    def disparate_loss(self, z1,k2, y1,y2, posy):
+    def disparate_loss(self, z1,k2, y1, posy):
         k2 = concat_all_gather(k2)
-        fz1,fz2 = self.filter(z1, k2, y1,y2, log=self.log)
+        fz1,fz2 = self.filter(z1, k2, y1,posy, log=self.log)
         
         scale = 1/self.T
         logits = scale * self.filter.contrast(fz1,fz2)
         
         
-        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude samples from y1
-        c2_mask = (posy.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude samples from y2
+        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y1
+        c2_mask = (posy.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y2
         class_mask = c1_mask|c2_mask
 
-        loss = multipos_ce_loss(logits,class_mask,class_mask)
+        loss = multipos_ce_loss(logits,c2_mask,class_mask)
         return loss
     
 
