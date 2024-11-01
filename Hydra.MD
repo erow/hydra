@@ -12,8 +12,9 @@ With batch 4096, the training of all ResNet-50 models can fit into 2 nodes with 
 Run:
 ```
 torchrun --nproc_per_node=8 main_moco.py \
-  --moco-m-cos --crop-min=.2 \
-  -b 2048 [your imagenet-folder with train and val folders]
+  --moco-m-cos --crop-min=.2 --moco-t 0.15 \
+  -b 2048 [your imagenet-folder with train and val folders]\
+  --output_dir [outputs]
 ```
 </details>
 
@@ -24,8 +25,9 @@ Run:
 ```
 torchrun --nproc_per_node=8 main_moco.py \
   --lr=.3 --epochs=300 \
-  --moco-m-cos --crop-min=.2 \
-  -b 4096 [your imagenet-folder with train and val folders]
+  --moco-m-cos --crop-min=.2 --moco-t 0.15 \
+  -b 4096 [your imagenet-folder with train and val folders]\
+  --output_dir [outputs]
 ```
 </details>
 
@@ -36,8 +38,9 @@ Run:
 ```
 torchrun --nproc_per_node=8 main_moco.py \
   --lr=.3 --wd=1.5e-6 --epochs=1000 \
-  --moco-m=0.996 --moco-m-cos --crop-min=.2 \
-  -b 4096 [your imagenet-folder with train and val folders]
+  --moco-m=0.996 --moco-m-cos --crop-min=.2 --moco-t 0.15 \
+  -b 4096 [your imagenet-folder with train and val folders]\
+  --output_dir [outputs]
 ```
 </details>
 
@@ -48,7 +51,8 @@ Run:
 ```
 torchrun --nproc_per_node=8 main_moco.py \
   --lr=.3 --wd=1.5e-6 --epochs=1000 \
-  --moco-m=0.996 --moco-m-cos --crop-min=.2 \
-  --gin MultiviewPipeline.scale="(0.2, 1)" -b 4096 --workers 40 --data_set ffcv [your dataset file]
+  --moco-m=0.996 --moco-m-cos --crop-min=.2 --moco-t 0.15 \
+  --gin MultiviewPipeline.scale="(0.2, 1)" -b 4096 --workers 40 --data_set ffcv [your dataset file] \
+  --output_dir [outputs]
 ```
 </details>

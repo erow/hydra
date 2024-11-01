@@ -50,7 +50,7 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
-parser.add_argument("--output_dir", type=str, default=None)
+parser.add_argument("--output_dir", type=str, )
 parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffcv","STL"])
 parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
@@ -153,8 +153,11 @@ def main():
     torch.cuda.set_device(args.gpu)
     args.dist_backend = 'nccl'
 
+    print("args: ", args)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
+                                         world_size=args.world_size, rank=args.rank,
+                                         timeout=datetime.timedelta(seconds=300),)
+    print("wait for sync")
     torch.distributed.barrier()
     setup_for_distributed(args.rank == 0)
     args.multiprocessing_distributed = True
@@ -277,8 +280,8 @@ def main_worker(gpu, ngpus_per_node, args):
                 loc = 'cuda:{}'.format(args.gpu)
                 checkpoint = torch.load(args.resume, map_location=loc)
             args.start_epoch = checkpoint['epoch']
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
+            print("resume model:", model.load_state_dict(checkpoint['state_dict'],False))
+            print("reumse opt:", optimizer.load_state_dict(checkpoint['optimizer']))
             scaler.load_state_dict(checkpoint['scaler'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
