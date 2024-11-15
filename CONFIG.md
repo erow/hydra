@@ -11,13 +11,12 @@ With batch 4096, the training of all ResNet-50 models can fit into 2 nodes with 
 
 On the first node, run:
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8 main_moco.py \
   --moco-m-cos --crop-min=.2 \
-  --dist-url 'tcp://[your first node address]:[specified port]' \
-  --multiprocessing-distributed --world-size 2 --rank 0 \
-  [your imagenet-folder with train and val folders]
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  --output_dir [outputs] [your imagenet-folder with train and val folders]
 ```
-On the second node, run the same command with `--rank 1`.
+On the second node, run the same command with `--node-rank 1`.
 </details>
 
 <details>
@@ -25,14 +24,13 @@ On the second node, run the same command with `--rank 1`.
 
 On the first node, run:
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8 main_moco.py \
   --lr=.3 --epochs=300 \
   --moco-m-cos --crop-min=.2 \
-  --dist-url 'tcp://[your first node address]:[specified port]' \
-  --multiprocessing-distributed --world-size 2 --rank 0 \
-  [your imagenet-folder with train and val folders]
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  --output_dir [outputs] [your imagenet-folder with train and val folders]
 ```
-On the second node, run the same command with `--rank 1`.
+On the second node, run the same command with `--node-rank 1`.
 </details>
 
 <details>
@@ -40,14 +38,27 @@ On the second node, run the same command with `--rank 1`.
 
 On the first node, run:
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8 main_moco.py \
   --lr=.3 --wd=1.5e-6 --epochs=1000 \
   --moco-m=0.996 --moco-m-cos --crop-min=.2 \
-  --dist-url 'tcp://[your first node address]:[specified port]' \
-  --multiprocessing-distributed --world-size 2 --rank 0 \
-  [your imagenet-folder with train and val folders]
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  --output_dir [outputs] [your imagenet-folder with train and val folders]
 ```
-On the second node, run the same command with `--rank 1`.
+On the second node, run the same command with `--node-rank 1`.
+</details>
+
+<details>
+<summary>ResNet-50, 1000-epoch pre-training using ffcv.</summary>
+
+Run:
+```
+torchrun --nproc_per_node=8 main_moco.py \
+  --lr=.3 --wd=1.5e-6 --epochs=1000 \
+  --moco-m=0.996 --moco-m-cos --crop-min=.2 --moco-t 0.15 \
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  -b 4096 --workers 40 \
+  --output_dir [outputs] --data_set ffcv [your dataset file] 
+```
 </details>
 
 <details>
@@ -102,18 +113,34 @@ Below are our pre-trained ResNet-50 models and logs.
 All ViT models are pre-trained for 300 epochs with AdamW.
 
 <details>
+<summary>ViT-Tiny, 1-node (8-GPU), 1024-batch pre-training.</summary>
+
+This setup fits into a single node of 8 Volta 32G GPUs, for ease of debugging.
+```
+torchrun --nproc_per_node=8 main_moco.py \
+  -a vit_tiny -b 1024 \
+  --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
+  --epochs=300 --warmup-epochs=40 \
+  --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  --output_dir [outputs] [your imagenet-folder with train and val folders]
+```
+
+</details>
+
+
+<details>
 <summary>ViT-Small, 1-node (8-GPU), 1024-batch pre-training.</summary>
 
 This setup fits into a single node of 8 Volta 32G GPUs, for ease of debugging.
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8  main_moco.py \
   -a vit_small -b 1024 \
   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
   --epochs=300 --warmup-epochs=40 \
   --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
-  --dist-url 'tcp://localhost:10001' \
-  --multiprocessing-distributed --world-size 1 --rank 0 \
-  [your imagenet-folder with train and val folders]
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  --output_dir [outputs] [your imagenet-folder with train and val folders]
 ```
 
 </details>
@@ -123,14 +150,13 @@ python main_moco.py \
 
 On the first node, run:
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8  main_moco.py \
   -a vit_small \
   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
   --epochs=300 --warmup-epochs=40 \
   --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
-  --dist-url 'tcp://[your first node address]:[specified port]' \
-  --multiprocessing-distributed --world-size 8 --rank 0 \
-  [your imagenet-folder with train and val folders]
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  --output_dir [outputs] [your imagenet-folder with train and val folders]
 ```
 On other nodes, run the same command with `--rank 1`, ..., `--rank 3` respectively.
 </details>
@@ -153,14 +179,13 @@ python main_lincls.py \
 <summary>ViT-Base, 8-node (64-GPU) pre-training.</summary>
 
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8  main_moco.py \
   -a vit_base \
   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
   --epochs=300 --warmup-epochs=40 \
   --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
-  --dist-url 'tcp://[your first node address]:[specified port]' \
-  --multiprocessing-distributed --world-size 8 --rank 0 \
-  [your imagenet-folder with train and val folders]
+  --gin MultiviewPipeline.scale="(0.2, 1)" MoCo.beta=1 \
+  --output_dir [outputs] [your imagenet-folder with train and val folders]
 ```
 On other nodes, run the same command with `--rank 1`, ..., `--rank 7` respectively.
 </details>

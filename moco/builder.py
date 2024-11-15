@@ -17,7 +17,7 @@ class MoCo(nn.Module):
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0,alpha=0,beta=0.0):
+    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0, alpha=0, beta=0.0):
         """
         dim: feature dimension (default: 256)
         mlp_dim: hidden dimension in MLPs (default: 4096)
@@ -124,9 +124,13 @@ class MoCo(nn.Module):
         class_loss = (self.disparate_loss(q1,k2,y,y) + 
                       self.disparate_loss(q2,k1,y,y))/2
         
-        loss  =  disparate_loss + instance_loss * self.alpha + class_loss * self.beta
+        loss  =  instance_loss + self.beta * disparate_loss + self.alpha * class_loss
+        loss /= (1 + self.alpha + self.beta)
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
         with torch.no_grad():
+            activation, entropy = self.filter.gate.statistics()
+            self.log['activation'] = activation.item()
+            self.log['entropy'] = entropy.item()
             self.log['dis'] = C - disparate_loss.item() 
             self.log['ins'] = C - instance_loss.item() 
             self.log['cls'] = C - class_loss.item() 
@@ -135,7 +139,7 @@ class MoCo(nn.Module):
     
     def disparate_loss(self, z1,k2, y1, posy):
         k2 = concat_all_gather(k2)
-        fz1,fz2 = self.filter(z1, k2, y1,posy, log=self.log)
+        fz1,fz2 = self.filter(z1, k2, y1,posy)
         
         scale = 1/self.T
         logits = scale * self.filter.contrast(fz1,fz2)
@@ -152,7 +156,7 @@ class MoCo(nn.Module):
     def class_loss(self,z1,k2,y1,y2):
         k2 = concat_all_gather(k2)
 
-        fz1,fz2 = self.filter(z1, k2, y1,log=self.log)
+        fz1,fz2 = self.filter(z1, k2, y1)
 
         scale = 1/self.T
         logits = scale * self.filter.contrast(fz1,fz2)

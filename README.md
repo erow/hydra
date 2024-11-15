@@ -1,86 +1,26 @@
-## MoCo v3 for Self-supervised ResNet and ViT
+## Hydra-MoCo for Universal Contrastive Leraning with ResNet and ViT
 
 ### Introduction
-This is a PyTorch implementation of [MoCo v3](https://arxiv.org/abs/2104.02057) for self-supervised ResNet and ViT.
+This is a PyTorch implementation of [Hydra-MoCo](https://arxiv.org/abs/2410.18200) for Universal Contrastive Leraning with ResNet and ViT.
 
-The original MoCo v3 was implemented in Tensorflow and run in TPUs. This repo re-implements in PyTorch and GPUs. Despite the library and numerical differences, this repo reproduces the results and observations in the paper. 
-
+This repository is based on the [MoCo v3](https://arxiv.org/abs/2104.02057) and [codes](https://github.com/facebookresearch/moco-v3).
 ### Main Results
 
 The following results are based on ImageNet-1k self-supervised pre-training, followed by ImageNet-1k supervised training for linear evaluation or end-to-end fine-tuning. All results in these tables are based on a batch size of 4096.
 
-**Pre-trained models** and **configs** can be found at [CONFIG.md](https://github.com/facebookresearch/moco-v3/blob/main/CONFIG.md).
+**Pre-trained models** and **configs** can be found at [CONFIG.md](CONFIG.md).
 
 #### ResNet-50, linear classification
-<table><tbody>
-<!-- START TABLE -->
-<!-- TABLE HEADER -->
-<th valign="center">pretrain<br/>epochs</th>
-<th valign="center">pretrain<br/>crops</th>
-<th valign="center">linear<br/>acc</th>
-<!-- TABLE BODY -->
-<tr>
-<td align="right">100</td>
-<td align="center">2x224</td>
-<td align="center">68.9</td>
-</tr>
-<tr>
-<td align="right">300</td>
-<td align="center">2x224</td>
-<td align="center">72.8</td>
-</tr>
-<tr>
-<td align="right">1000</td>
-<td align="center">2x224</td>
-<td align="center">74.6</td>
-</tr>
-</tbody></table>
+
+todo:
 
 #### ViT, linear classification
-<table><tbody>
-<!-- START TABLE -->
-<!-- TABLE HEADER -->
-<th valign="center">model</th>
-<th valign="center">pretrain<br/>epochs</th>
-<th valign="center">pretrain<br/>crops</th>
-<th valign="center">linear<br/>acc</th>
-<!-- TABLE BODY -->
-<tr>
-<td align="left">ViT-Small</td>
-<td align="right">300</td>
-<td align="center">2x224</td>
-<td align="center">73.2</td>
-</tr>
-<tr>
-<td align="left">ViT-Base</td>
-<td align="right">300</td>
-<td align="center">2x224</td>
-<td align="center">76.7</td>
-</tr>
-</tbody></table>
+
+todo:
 
 #### ViT, end-to-end fine-tuning
-<table><tbody>
-<!-- START TABLE -->
-<!-- TABLE HEADER -->
-<th valign="center">model</th>
-<th valign="center">pretrain<br/>epochs</th>
-<th valign="center">pretrain<br/>crops</th>
-<th valign="center">e2e<br/>acc</th>
-<!-- TABLE BODY -->
-<tr>
-<td align="left">ViT-Small</td>
-<td align="right">300</td>
-<td align="center">2x224</td>
-<td align="center">81.4</td>
-</tr>
-<tr>
-<td align="left">ViT-Base</td>
-<td align="right">300</td>
-<td align="center">2x224</td>
-<td align="center">83.2</td>
-</tr>
-</tbody></table>
+
+todo:
 
 The end-to-end fine-tuning results are obtained using the [DeiT](https://github.com/facebookresearch/deit) repo, using all the default DeiT configs. ViT-B is fine-tuned for 150 epochs (vs DeiT-B's 300ep, which has 81.8% accuracy).
 
@@ -99,10 +39,8 @@ Below are three examples for MoCo v3 pre-training.
 
 On the first node, run:
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8 --nnodes=2  --node-rank=${rank} main_moco.py \
   --moco-m-cos --crop-min=.2 \
-  --dist-url 'tcp://[your first node address]:[specified port]' \
-  --multiprocessing-distributed --world-size 2 --rank 0 \
   [your imagenet-folder with train and val folders]
 ```
 On the second node, run the same command with `--rank 1`.
@@ -112,13 +50,11 @@ With a batch size of 4096, the training can fit into 2 nodes with a total of 16 
 #### ViT-Small with 1-node (8-GPU) training, batch 1024
 
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8 --nnodes=1  --node-rank=${rank} main_moco.py \
   -a vit_small -b 1024 \
   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
   --epochs=300 --warmup-epochs=40 \
   --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
-  --dist-url 'tcp://localhost:10001' \
-  --multiprocessing-distributed --world-size 1 --rank 0 \
   [your imagenet-folder with train and val folders]
 ```
 
@@ -126,7 +62,7 @@ python main_moco.py \
 
 With a batch size of 4096, ViT-Base is trained with 8 nodes:
 ```
-python main_moco.py \
+torchrun --nproc_per_node=8 --nnodes=2  --node-rank=${rank} main_moco.py \
   -a vit_base \
   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
   --epochs=300 --warmup-epochs=40 \
@@ -178,7 +114,7 @@ This gives us 83.2% accuracy for ViT-Base with 150-epoch fine-tuning.
 
 ### Model Configs
 
-See the commands listed in [CONFIG.md](https://github.com/facebookresearch/moco-v3/blob/main/CONFIG.md) for specific model configs, including our recommended hyper-parameters and pre-trained reference models.
+See the commands listed in [CONFIG.md](CONFIG.md) for specific model configs, including our recommended hyper-parameters and pre-trained reference models.
 
 ### Transfer Learning
 
@@ -190,10 +126,13 @@ This project is under the CC-BY-NC 4.0 license. See [LICENSE](LICENSE) for detai
 
 ### Citation
 ```
-@Article{chen2021mocov3,
-  author  = {Xinlei Chen* and Saining Xie* and Kaiming He},
-  title   = {An Empirical Study of Training Self-Supervised Vision Transformers},
-  journal = {arXiv preprint arXiv:2104.02057},
-  year    = {2021},
+@misc{wu2024rethinkingpositivepairscontrastive,
+      title={Rethinking Positive Pairs in Contrastive Learning}, 
+      author={Jiantao Wu and Shentong Mo and Zhenhua Feng and Sara Atito and Josef Kitler and Muhammad Awais},
+      year={2024},
+      eprint={2410.18200},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2410.18200}, 
 }
 ```

@@ -33,12 +33,14 @@ class BasicGate(OpenGate):
         self.lam = lam
         self.fuse = fuse
 
-    def gate_reg(self):
+    def statistics(self):
         labels = torch.arange(self.num_classes).cuda()
         label_embeds = self.label_embedding(labels)
         logits = self.mlp(label_embeds)
-        gate = logits.sigmoid()
-        return gate.mean()
+        gates = logits.sigmoid()
+        activation = gates.sum(1).mean()
+        entropy = torch.distributions.Bernoulli(gates).entropy().mean()
+        return activation, entropy
     
     def forward(self,y1,y2=None,log=None):
         if self.fuse:      
@@ -56,15 +58,6 @@ class BasicGate(OpenGate):
                 gate1 = self.mlp(self.label_embedding(y1)).sigmoid()
                 gate2 = self.mlp(self.label_embedding(y2)).sigmoid()
                 gate = gate1 * gate2
-        
-        if not log is None:
-            p = gate.detach()
-            dist = torch.distributions.Bernoulli(p)
-            entropy = dist.entropy()
-            log['entropy'] = entropy.mean().item()
-            open = (gate>0.5).float()
-            log['activation']=(open.sum(0)>20).float().sum().item()
-            
         return gate
 
 
@@ -151,9 +144,9 @@ class Filter(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.gate = gate_fn(embed_dim,num_classes=num_classes)
-
-    def forward(self, x1,x2,y1,y2=None, log=None):
-        gate = self.gate(y1,y2,log=log)
+    
+    def forward(self, x1,x2,y1,y2=None):
+        gate = self.gate(y1,y2)
         x1 = torch.einsum("bk,bk->bk",x1,gate)
         x2 = torch.einsum("nk,bk->bnk",x2,gate)
         x1 =  F.normalize(x1,p=2,dim=-1)

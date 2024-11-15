@@ -47,10 +47,10 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(torchvision_models.__dict__[name]))
 
-model_names = ['vit_small', 'vit_base', 'vit_conv_small', 'vit_conv_base'] + torchvision_model_names
+model_names = vits.__all__ + torchvision_model_names
 
-parser = argparse.ArgumentParser(description='MoCo ImageNet Pre-Training')
-parser.add_argument("--output_dir", type=str, )
+parser = argparse.ArgumentParser(description='Hydra MoCo ImageNet Pre-Training')
+parser.add_argument("--output_dir", type=str, required=True)
 parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffcv","STL"])
 parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
@@ -86,6 +86,8 @@ parser.add_argument('--world-size', default=-1, type=int,
                     help='number of nodes for distributed training')
 parser.add_argument('--rank', default=-1, type=int,
                     help='node rank for distributed training')
+parser.add_argument('--local-rank', default=0, type=int,
+                    help='local node rank for distributed training')
 parser.add_argument('--dist-url', default='env://', type=str,
                     help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str,
@@ -145,13 +147,11 @@ def main():
     args.world_size = int(os.environ['WORLD_SIZE'])
     args.gpu = int(os.environ['LOCAL_RANK'])
 
-    if args.gpu is not None:
-        warnings.warn('You have chosen a specific GPU. This will completely '
-                      'disable data parallelism.')
-
     args.distributed = True
     torch.cuda.set_device(args.gpu)
     args.dist_backend = 'nccl'
+    # ring accuracy is not good, https://zhuanlan.zhihu.com/p/701623664
+    # NCCL_ALGO=Tree
 
     print("args: ", args)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
@@ -165,42 +165,8 @@ def main():
     return main_worker(args.gpu, ngpus_per_node, args)
 
 
-    ngpus_per_node = torch.cuda.device_count()
-    
-    if args.multiprocessing_distributed:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
-        # Use torch.multiprocessing.spawn to launch distributed processes: the
-        # main_worker process function
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
-    else:
-        # Simply call main_worker function
-        main_worker(args.gpu, ngpus_per_node, args)
-
-
 def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
-
-    # suppress printing if not first GPU on each node
-    # if args.multiprocessing_distributed and (args.gpu != 0 or args.rank != 0):
-    #     def print_pass(*args):
-    #         pass
-    #     builtins.print = print_pass
-
-    # if args.gpu is not None:
-    #     print("Use GPU: {} for training".format(args.gpu))
-
-    # if args.distributed:
-    #     if args.dist_url == "env://" and args.rank == -1:
-    #         args.rank = int(os.environ["RANK"])
-    #     if args.multiprocessing_distributed:
-    #         # For multiprocessing distributed training, rank needs to be the
-    #         # global rank among all the processes
-    #         args.rank = args.rank * ngpus_per_node + gpu
-    #     dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-    #                             world_size=args.world_size, rank=args.rank)
-    #     torch.distributed.barrier()
     
     if args.output_dir:
         os.makedirs(args.output_dir,exist_ok=True)
@@ -209,11 +175,11 @@ def main_worker(gpu, ngpus_per_node, args):
     if args.arch.startswith('vit'):
         model = moco.builder.MoCo_ViT(
             partial(vits.__dict__[args.arch], stop_grad_conv1=args.stop_grad_conv1),
-            args.moco_dim, args.moco_mlp_dim, args.moco_t)
+            args.moco_dim, args.moco_mlp_dim, T=args.moco_t)
     else:
         model = moco.builder.MoCo_ResNet(
             partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), 
-            args.moco_dim, args.moco_mlp_dim, args.moco_t)
+            args.moco_dim, args.moco_mlp_dim, T=args.moco_t)
 
     # infer learning rate before changing batch size
     args.lr = args.lr * args.batch_size / 256
@@ -244,7 +210,7 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         # comment out the following line for debugging
-        # raise NotImplementedError("Only DistributedDataParallel is supported.")
+        raise NotImplementedError("Only DistributedDataParallel is supported.")
     else:
         # AllGather/rank implementation in this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
@@ -357,6 +323,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train_loader = torch.utils.data.DataLoader(
             train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
             num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+        
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed and not (args.data_set =='ffcv'):
             train_sampler.set_epoch(epoch)
@@ -383,11 +350,6 @@ def main_worker(gpu, ngpus_per_node, args):
                     'scaler': scaler.state_dict(),
                 }, is_best=False, filename=args.output_dir +'/checkpoint.pth')
         
-        if (not args.multiprocessing_distributed or (
-            args.multiprocessing_distributed and args.rank == 0)) and epoch%20==0 and args.data_set == 'STL':
-            model.eval()
-            evaluate(model, args, epoch)
-            model.train()
 
     if args.rank == 0:
         save_checkpoint({
@@ -398,6 +360,7 @@ def main_worker(gpu, ngpus_per_node, args):
                     'scaler': scaler.state_dict(),
                 }, is_best=False, filename=args.output_dir +'/checkpoint.pth')
         summary_writer.close()
+    return model
 
 stl_val_loader = None
 stl_train_loader = None
@@ -612,4 +575,6 @@ def setup_for_distributed(is_master):
     builtins.print = print
 
 if __name__ == '__main__':
+    import sys
+    print("running", sys.argv)
     main()
