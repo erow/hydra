@@ -32,8 +32,7 @@ import torchvision.datasets as datasets
 import torchvision.models as torchvision_models
 from torch.utils.tensorboard import SummaryWriter
 import wandb
-from multiloader import MultiLoader
-import ffcv_transform
+
 
 import moco.builder
 import moco.loader
@@ -288,6 +287,8 @@ def main_worker(gpu, ngpus_per_node, args):
     ]
 
     if (args.data_set =='ffcv'):
+        from multiloader import MultiLoader
+        import ffcv_transform
         pipelines = ffcv_transform.MultiviewPipeline()
         train_loader = MultiLoader(
             args.data,
