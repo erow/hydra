@@ -35,6 +35,7 @@ class MoCo(nn.Module):
         self.filter = Filter(self.num_classes,dim)
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
+        self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
 
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
@@ -134,6 +135,7 @@ class MoCo(nn.Module):
             self.log['dis'] = C - disparate_loss.item() 
             self.log['ins'] = C - instance_loss.item() 
             self.log['cls'] = C - class_loss.item() 
+            self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         return loss, self.log
     
@@ -141,7 +143,7 @@ class MoCo(nn.Module):
         k2 = concat_all_gather(k2)
         fz1,fz2 = self.filter(z1, k2, y1,posy)
         
-        scale = 1/self.T
+        scale = self.scale_logit.exp()
         logits = scale * self.filter.contrast(fz1,fz2)
         
         
