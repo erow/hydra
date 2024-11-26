@@ -63,6 +63,8 @@ parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
                     help='number of data loading workers (default: 10)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
+parser.add_argument('--ckpt-freq', default=100, type=int, metavar='N',
+                    help='frequency of saving checkpoints')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
 parser.add_argument('-b', '--batch-size', default=4096, type=int,
@@ -334,7 +336,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
         if args.output_dir and (not args.multiprocessing_distributed or (
             args.multiprocessing_distributed and args.rank == 0)): # only the first GPU saves checkpoint
-            if (epoch+1) % 50 ==0:
+            if (epoch+1) % args.ckpt_freq ==0:
                 save_checkpoint({
                     'epoch': epoch + 1,
                     'arch': args.arch,

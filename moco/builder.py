@@ -116,17 +116,22 @@ class MoCo(nn.Module):
             k2 = self.momentum_encoder(x2)
 
         instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
-        
-        # disparate contrast
-        disparate_loss = (
-            self.disparate_loss(q1,k2,y,sy) + 
-            self.disparate_loss(q2,k1,y,sy))/2
-        #
-        class_loss = (self.disparate_loss(q1,k2,y,y) + 
-                      self.disparate_loss(q2,k1,y,y))/2
-        
-        loss  =  instance_loss + self.beta * disparate_loss + self.alpha * class_loss
+        loss  =  instance_loss
+
+        if self.beta>0:
+            # disparate contrast
+            disparate_loss = (
+                self.disparate_loss(q1,k2,y,sy) + 
+                self.disparate_loss(q2,k1,y,sy))/2
+            
+            loss += self.beta * disparate_loss
+        if self.alpha>0:
+            class_loss = (self.disparate_loss(q1,k2,y,y) + 
+                        self.disparate_loss(q2,k1,y,y))/2
+            loss += self.alpha * class_loss
+
         loss /= (1 + self.alpha + self.beta)
+        
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
         with torch.no_grad():
             activation, entropy = self.filter.gate.statistics()
