@@ -131,15 +131,17 @@ class MoCo(nn.Module):
             loss += self.alpha * class_loss
 
         loss /= (1 + self.alpha + self.beta)
-        
+
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
         with torch.no_grad():
             activation, entropy = self.filter.gate.statistics()
             self.log['activation'] = activation.item()
             self.log['entropy'] = entropy.item()
-            self.log['dis'] = C - disparate_loss.item() 
             self.log['ins'] = C - instance_loss.item() 
-            self.log['cls'] = C - class_loss.item() 
+            if self.beta>0:
+                self.log['dis'] = C - disparate_loss.item() 
+            if self.alpha>0:
+                self.log['cls'] = C - class_loss.item() 
             self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         return loss, self.log
