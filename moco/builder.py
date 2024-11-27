@@ -37,6 +37,8 @@ class MoCo(nn.Module):
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
         self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
 
+        self.bn = nn.BatchNorm1d(dim, affine=False)
+        self.ln = nn.LayerNorm(dim)
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
             param_m.requires_grad = False  # not update by gradient
@@ -61,7 +63,8 @@ class MoCo(nn.Module):
                 # for simplicity, we further removed gamma in BN
                 # mlp.append(nn.BatchNorm1d(dim2, affine=False))
                 # BN will prevent gate close
-                mlp.append(nn.LayerNorm(output_dim)) 
+                # mlp.append(nn.LayerNorm(output_dim)) 
+                pass
 
         return nn.Sequential(*mlp)
 
@@ -75,6 +78,8 @@ class MoCo(nn.Module):
             param_m.data = param_m.data * m + param_b.data * (1. - m)
 
     def contrastive_loss(self, q, k):
+        # note: apply bn for query
+        q = self.bn(q)
         # normalize
         q = nn.functional.normalize(q, dim=1)
         k = nn.functional.normalize(k, dim=1)
@@ -146,7 +151,10 @@ class MoCo(nn.Module):
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         return loss, self.log
     
-    def disparate_loss(self, z1,k2, y1, posy):
+    def disparate_loss(self, z1, k2, y1, posy):
+        # note: apply ln for query
+        z1 = self.ln(z1)
+
         k2 = concat_all_gather(k2)
         fz1,fz2 = self.filter(z1, k2, y1,posy)
         
