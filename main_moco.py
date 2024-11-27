@@ -41,6 +41,9 @@ import datetime
 
 import vits
 
+from multiloader import MultiLoader
+import ffcv_transform
+
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
     if name.islower() and not name.startswith("__")
@@ -130,6 +133,7 @@ parser.add_argument('--crop-min', default=0.08, type=float,
                     help='minimum scale for random cropping (default: 0.08)')
 parser.add_argument('--gin', default=[], type=str, nargs='+', help='gin bindings')
 
+
 def main():
     args = parser.parse_args()
     gin.parse_config(args.gin)
@@ -201,7 +205,7 @@ def main_worker(gpu, ngpus_per_node, args):
             # ourselves based on the total number of GPUs we have
             args.batch_size = int(args.batch_size / args.world_size)
             args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu],find_unused_parameters=True)
         else:
             model.cuda()
             # DistributedDataParallel will divide and allocate batch_size to all
@@ -289,8 +293,7 @@ def main_worker(gpu, ngpus_per_node, args):
     ]
 
     if (args.data_set =='ffcv'):
-        from multiloader import MultiLoader
-        import ffcv_transform
+        
         pipelines = ffcv_transform.MultiviewPipeline()
         train_loader = MultiLoader(
             args.data,
