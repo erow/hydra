@@ -17,7 +17,7 @@ class MoCo(nn.Module):
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0, alpha=0, beta=0.0, compile=False):
+    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0, alpha=0, beta=0.0, compile=False,norm='bn-bn'):
         """
         dim: feature dimension (default: 256)
         mlp_dim: hidden dimension in MLPs (default: 4096)
@@ -33,6 +33,7 @@ class MoCo(nn.Module):
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
         self.filter = Filter(self.num_classes,dim)
+        self.norm = norm
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
         self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
@@ -52,7 +53,7 @@ class MoCo(nn.Module):
     def representation(self, x):
         return self.momentum_encoder(x)
     
-    def _build_mlp(self, num_layers, input_dim, mlp_dim, output_dim, last_bn=True):
+    def _build_mlp(self, num_layers, input_dim, mlp_dim, output_dim, last_norm='bn'):
         mlp = []
         for l in range(num_layers):
             dim1 = input_dim if l == 0 else mlp_dim
@@ -64,13 +65,17 @@ class MoCo(nn.Module):
                 mlp.append(nn.BatchNorm1d(dim2))
                 mlp.append(nn.ReLU(inplace=True))
             else:
-                if last_bn:
+                if last_norm=='bn':
                     # follow SimCLR's design: https://github.com/google-research/simclr/blob/master/model_util.py#L157
                     # for simplicity, we further removed gamma in BN
                     mlp.append(nn.BatchNorm1d(dim2, affine=False))
-                else:
+                elif last_norm=='ln':
                     # BN will prevent gate close
                     mlp.append(nn.LayerNorm(dim2))
+                elif last_norm=='none':
+                    pass
+                else:
+                    raise ValueError(f'last_norm={last_norm} not supported')
 
         return nn.Sequential(*mlp)
 
@@ -111,7 +116,7 @@ class MoCo(nn.Module):
         shuffle_idx = torch.randperm(len(x1)).to(x1.device)
         y = targets.clone()
         sy = targets[shuffle_idx].contiguous()
-        # gate = self.filter.gate(y)
+        
         # compute features
         z1 = self.base_encoder(x1)
         z2 = self.base_encoder(x2)
@@ -126,8 +131,7 @@ class MoCo(nn.Module):
 
         instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
         loss  =  instance_loss
-        q1 = self.predictor2(z1)
-        q2 = self.predictor2(z2)
+
         if self.beta>0:
             # disparate contrast
             disparate_loss = (
@@ -157,9 +161,6 @@ class MoCo(nn.Module):
         return loss, self.log
     
     def disparate_loss(self, z1, k2, y1, posy):
-        # note: apply ln for query
-        z1 = self.ln(z1)
-
         k2 = concat_all_gather(k2)
         fz1,fz2 = self.filter(z1, k2, y1,posy)
         
@@ -194,13 +195,13 @@ class MoCo_ResNet(MoCo):
         hidden_dim = self.base_encoder.fc.weight.shape[1]
         del self.base_encoder.fc, self.momentum_encoder.fc # remove original fc layer
 
+        norm1,norm2 = self.norm.split('-') # bn-none for resnet in MoCo
         # projectors
-        self.base_encoder.fc = self._build_mlp(2, hidden_dim, mlp_dim, dim)
-        self.momentum_encoder.fc = self._build_mlp(2, hidden_dim, mlp_dim, dim)
+        self.base_encoder.fc = self._build_mlp(2, hidden_dim, mlp_dim, dim, norm1)
+        self.momentum_encoder.fc = self._build_mlp(2, hidden_dim, mlp_dim, dim, norm1)
 
         # predictor
-        self.predictor = self._build_mlp(2, dim, mlp_dim, dim, False)
-        self.predictor2 = self._build_mlp(2, dim, mlp_dim, dim, False)
+        self.predictor = self._build_mlp(2, dim, mlp_dim, dim, norm2)
 
 
 class MoCo_ViT(MoCo):
@@ -208,13 +209,13 @@ class MoCo_ViT(MoCo):
         hidden_dim = self.base_encoder.head.weight.shape[1]
         del self.base_encoder.head, self.momentum_encoder.head # remove original fc layer
 
+        norm1,norm2 = self.norm.split('-') # bn-bn for resnet in MoCo
         # projectors
-        self.base_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, True)
-        self.momentum_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, True)
+        self.base_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, norm1)
+        self.momentum_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, norm1)
 
         # predictor
-        self.predictor = self._build_mlp(2, dim, mlp_dim, dim, True)
-        self.predictor2 = self._build_mlp(2, dim, mlp_dim, dim, False)
+        self.predictor = self._build_mlp(2, dim, mlp_dim, dim, norm2)
 
 
 # utils
