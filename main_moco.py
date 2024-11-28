@@ -57,7 +57,6 @@ parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffc
 parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
-parser.add_argument("--compile", action="store_true",default=False)
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -197,10 +196,7 @@ def main_worker(gpu, ngpus_per_node, args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
-        # DistributedDataParallel will use all available devices.
-        if args.compile:
-            model = torch.compile(model,)
-        
+        # DistributedDataParallel will use all available devices.        
         torch.cuda.set_device(args.gpu)
         model.cuda(args.gpu)
         # When using a single GPU per process and per

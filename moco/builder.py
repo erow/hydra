@@ -17,7 +17,7 @@ class MoCo(nn.Module):
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0, alpha=0, beta=0.0):
+    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0, alpha=0, beta=0.0, compile=False):
         """
         dim: feature dimension (default: 256)
         mlp_dim: hidden dimension in MLPs (default: 4096)
@@ -36,12 +36,17 @@ class MoCo(nn.Module):
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
         self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
-
-        self.bn = nn.BatchNorm1d(dim, affine=False)
-        self.ln = nn.LayerNorm(dim)
+        
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
             param_m.requires_grad = False  # not update by gradient
+        
+        if compile:
+            self.base_encoder = torch.compile(self.base_encoder)
+            self.momentum_encoder = torch.compile(self.momentum_encoder)
+            self.filter = torch.compile(self.filter)
+            self.predictor = torch.compile(self.predictor)
+            self.predictor2 = torch.compile(self.predictor2)
     
     @torch.no_grad()
     def representation(self, x):
@@ -58,13 +63,14 @@ class MoCo(nn.Module):
             if l < num_layers - 1:
                 mlp.append(nn.BatchNorm1d(dim2))
                 mlp.append(nn.ReLU(inplace=True))
-            elif last_bn:
-                # follow SimCLR's design: https://github.com/google-research/simclr/blob/master/model_util.py#L157
-                # for simplicity, we further removed gamma in BN
-                # mlp.append(nn.BatchNorm1d(dim2, affine=False))
-                # BN will prevent gate close
-                # mlp.append(nn.LayerNorm(output_dim)) 
-                pass
+            else:
+                if last_bn:
+                    # follow SimCLR's design: https://github.com/google-research/simclr/blob/master/model_util.py#L157
+                    # for simplicity, we further removed gamma in BN
+                    mlp.append(nn.BatchNorm1d(dim2, affine=False))
+                else:
+                    # BN will prevent gate close
+                    mlp.append(nn.LayerNorm(dim2))
 
         return nn.Sequential(*mlp)
 
@@ -78,8 +84,6 @@ class MoCo(nn.Module):
             param_m.data = param_m.data * m + param_b.data * (1. - m)
 
     def contrastive_loss(self, q, k):
-        # note: apply bn for query
-        q = self.bn(q)
         # normalize
         q = nn.functional.normalize(q, dim=1)
         k = nn.functional.normalize(k, dim=1)
@@ -122,7 +126,8 @@ class MoCo(nn.Module):
 
         instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
         loss  =  instance_loss
-
+        q1 = self.predictor2(z1)
+        q2 = self.predictor2(z2)
         if self.beta>0:
             # disparate contrast
             disparate_loss = (
@@ -195,6 +200,7 @@ class MoCo_ResNet(MoCo):
 
         # predictor
         self.predictor = self._build_mlp(2, dim, mlp_dim, dim, False)
+        self.predictor2 = self._build_mlp(2, dim, mlp_dim, dim, False)
 
 
 class MoCo_ViT(MoCo):
@@ -203,11 +209,12 @@ class MoCo_ViT(MoCo):
         del self.base_encoder.head, self.momentum_encoder.head # remove original fc layer
 
         # projectors
-        self.base_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim)
-        self.momentum_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim)
+        self.base_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, True)
+        self.momentum_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, True)
 
         # predictor
-        self.predictor = self._build_mlp(2, dim, mlp_dim, dim)
+        self.predictor = self._build_mlp(2, dim, mlp_dim, dim, True)
+        self.predictor2 = self._build_mlp(2, dim, mlp_dim, dim, False)
 
 
 # utils
