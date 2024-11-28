@@ -57,6 +57,7 @@ parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffc
 parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
+parser.add_argument("--compile", action="store_true",default=False)
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -185,7 +186,7 @@ def main_worker(gpu, ngpus_per_node, args):
         model = moco.builder.MoCo_ResNet(
             partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), 
             args.moco_dim, args.moco_mlp_dim, T=args.moco_t)
-
+    
     # infer learning rate before changing batch size
     args.lr = args.lr * args.batch_size / 256
 
@@ -197,20 +198,17 @@ def main_worker(gpu, ngpus_per_node, args):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        if args.gpu is not None:
-            torch.cuda.set_device(args.gpu)
-            model.cuda(args.gpu)
-            # When using a single GPU per process and per
-            # DistributedDataParallel, we need to divide the batch size
-            # ourselves based on the total number of GPUs we have
-            args.batch_size = int(args.batch_size / args.world_size)
-            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu],find_unused_parameters=True)
-        else:
-            model.cuda()
-            # DistributedDataParallel will divide and allocate batch_size to all
-            # available GPUs if device_ids are not set
-            model = torch.nn.parallel.DistributedDataParallel(model,find_unused_parameters=True)
+        if args.compile:
+            model = torch.compile(model,)
+        
+        torch.cuda.set_device(args.gpu)
+        model.cuda(args.gpu)
+        # When using a single GPU per process and per
+        # DistributedDataParallel, we need to divide the batch size
+        # ourselves based on the total number of GPUs we have
+        args.batch_size = int(args.batch_size / args.world_size)
+        args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu],find_unused_parameters=True)
     elif args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
