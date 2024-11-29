@@ -167,6 +167,42 @@ def MultiviewPipeline(img_size=224,scale=(0.4, 1.0),local_crops_number=0,
     pipelines['label'] = label_pipeline
     return pipelines
 
+
+@gin.configurable
+def SimpleMultiviewPipeline(img_size=224,scale=(0.4, 1.0),local_crops_number=0,
+                      local_img_size=96,device='cuda'):
+    k = local_img_size/img_size
+    local_scale=(scale[0]*k, scale[1]*k)
+    
+    image_pipeline = [
+        NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32),
+        ToTensor(), ToTorchImage(),
+        ToDevice(torch.device(device),non_blocking=True),
+    ]
+    image_pipeline2 = [
+        NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32),
+        ToTensor(), ToTorchImage(),
+        ToDevice(torch.device(device),non_blocking=True),
+    ]
+    def _local_pipeline():
+        return [
+            NormalizeImage(IMAGENET_MEAN, IMAGENET_STD, np.float32),
+            ToTensor(), ToTorchImage(),
+            Convert(torch.float16),
+            ToDevice(torch.device(device),non_blocking=True),
+        ]
+    label_pipeline = [IntDecoder(), ToTensor(),View(-1)]
+    # Pipeline for each data field
+    from ffcv.pipeline import PipelineSpec
+    pipelines = {
+        'image': PipelineSpec("image",RandomResizedCropRGBImageDecoder((img_size, img_size),scale=scale),transforms=image_pipeline),
+        'image2': PipelineSpec("image",RandomResizedCropRGBImageDecoder((img_size, img_size),scale=scale),transforms=image_pipeline2),        
+    } 
+    for i in range(local_crops_number):
+        pipelines[f"local_{i}"] = PipelineSpec("image",RandomResizedCropRGBImageDecoder((local_img_size, local_img_size),scale=local_scale),transforms=_local_pipeline())
+    pipelines['label'] = label_pipeline
+    return pipelines
+
 from ffcv.loader import Loader, OrderOption
 from ffcv.traversal_order.base import TraversalOrder
 from torch.utils.data import DistributedSampler

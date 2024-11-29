@@ -11,13 +11,18 @@ import torch.nn as nn
 from .filter import Filter, ConvFilter
 import gin
 
-@gin.configurable()
+@gin.configurable(denylist=['dim','mlp_dim','T'])
 class MoCo(nn.Module):
     """
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
     """
-    def __init__(self, base_encoder, dim=256, mlp_dim=4096, T=1.0, alpha=0, beta=0.0, compile=False,norm='bn-bn'):
+    def __init__(self, base_encoder, 
+                 dim=256, mlp_dim=4096, T=1.0, 
+                 alpha=0, beta=0.0, compile=False,
+                 norm='ln-none',
+                 num_layers = 3,
+                 num_classes=1000):
         """
         dim: feature dimension (default: 256)
         mlp_dim: hidden dimension in MLPs (default: 4096)
@@ -28,7 +33,8 @@ class MoCo(nn.Module):
         self.T = T
         self.alpha=alpha
         self.beta = beta
-        self.num_classes=1000
+        self.num_classes=num_classes
+        self.num_layers = num_layers 
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
@@ -47,7 +53,6 @@ class MoCo(nn.Module):
             self.momentum_encoder = torch.compile(self.momentum_encoder)
             self.filter = torch.compile(self.filter)
             self.predictor = torch.compile(self.predictor)
-            self.predictor2 = torch.compile(self.predictor2)
     
     @torch.no_grad()
     def representation(self, x):
@@ -64,18 +69,18 @@ class MoCo(nn.Module):
             if l < num_layers - 1:
                 mlp.append(nn.BatchNorm1d(dim2))
                 mlp.append(nn.ReLU(inplace=True))
-            else:
-                if last_norm=='bn':
-                    # follow SimCLR's design: https://github.com/google-research/simclr/blob/master/model_util.py#L157
-                    # for simplicity, we further removed gamma in BN
-                    mlp.append(nn.BatchNorm1d(dim2, affine=False))
-                elif last_norm=='ln':
-                    # BN will prevent gate close
-                    mlp.append(nn.LayerNorm(dim2))
-                elif last_norm=='none':
-                    pass
-                else:
-                    raise ValueError(f'last_norm={last_norm} not supported')
+
+        if last_norm=='bn':
+            # follow SimCLR's design: https://github.com/google-research/simclr/blob/master/model_util.py#L157
+            # for simplicity, we further removed gamma in BN
+            mlp.append(nn.BatchNorm1d(output_dim, affine=False))
+        elif last_norm=='ln':
+            # BN will prevent gate close
+            mlp.append(nn.LayerNorm(output_dim))
+        elif last_norm=='none':
+            pass
+        else:
+            raise ValueError(f'last_norm={last_norm} not supported')
 
         return nn.Sequential(*mlp)
 
@@ -197,8 +202,8 @@ class MoCo_ResNet(MoCo):
 
         norm1,norm2 = self.norm.split('-') # bn-none for resnet in MoCo
         # projectors
-        self.base_encoder.fc = self._build_mlp(2, hidden_dim, mlp_dim, dim, norm1)
-        self.momentum_encoder.fc = self._build_mlp(2, hidden_dim, mlp_dim, dim, norm1)
+        self.base_encoder.fc = self._build_mlp(self.num_layers, hidden_dim, mlp_dim, dim, norm1)
+        self.momentum_encoder.fc = self._build_mlp(self.num_layers, hidden_dim, mlp_dim, dim, norm1)
 
         # predictor
         self.predictor = self._build_mlp(2, dim, mlp_dim, dim, norm2)
@@ -211,8 +216,8 @@ class MoCo_ViT(MoCo):
 
         norm1,norm2 = self.norm.split('-') # bn-bn for resnet in MoCo
         # projectors
-        self.base_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, norm1)
-        self.momentum_encoder.head = self._build_mlp(3, hidden_dim, mlp_dim, dim, norm1)
+        self.base_encoder.head = self._build_mlp(self.num_layers, hidden_dim, mlp_dim, dim, norm1)
+        self.momentum_encoder.head = self._build_mlp(self.num_layers, hidden_dim, mlp_dim, dim, norm1)
 
         # predictor
         self.predictor = self._build_mlp(2, dim, mlp_dim, dim, norm2)

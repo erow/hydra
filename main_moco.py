@@ -57,6 +57,7 @@ parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffc
 parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
+parser.add_argument("--aug", default="default", type=str, choices=["default","simple"])
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -261,34 +262,44 @@ def main_worker(gpu, ngpus_per_node, args):
                                      std=[0.229, 0.224, 0.225])
 
     # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
-    augmentation1 = [
-        transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
+    if args.aug == 'default':
+        augmentation1 = [
+            transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
+            transforms.RandomApply([
+                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize
+        ]
 
-    augmentation2 = [
-        transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
-        transforms.RandomApply([
-            transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-        ], p=0.8),
-        transforms.RandomGrayscale(p=0.2),
-        transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),
-        transforms.RandomApply([moco.loader.Solarize()], p=0.2),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        normalize
-    ]
+        augmentation2 = [
+            transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
+            transforms.RandomApply([
+                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+            ], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),
+            transforms.RandomApply([moco.loader.Solarize()], p=0.2),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            normalize
+        ]
+    elif args.aug == 'simple':
+        augmentation1 = [
+            transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
+            transforms.ToTensor(),
+            normalize
+        ]
+        augmentation2 = augmentation1
 
     if (args.data_set =='ffcv'):
-        
-        pipelines = ffcv_transform.MultiviewPipeline()
+        if args.aug == 'default':
+            pipelines = ffcv_transform.MultiviewPipeline(args.img_size, scale=(args.crop_min, 1.))
+        else:
+            pipelines = ffcv_transform.SimpleMultiviewPipeline(args.img_size, scale=(args.crop_min, 1.))
         train_loader = MultiLoader(
             args.data,
             batch_size=args.batch_size,
@@ -352,13 +363,7 @@ def main_worker(gpu, ngpus_per_node, args):
         
 
     if args.rank == 0:
-        save_checkpoint({
-                    'epoch': epoch + 1,
-                    'arch': args.arch,
-                    'state_dict': model.state_dict(),
-                    'optimizer' : optimizer.state_dict(),
-                    'scaler': scaler.state_dict(),
-                }, is_best=False, filename=args.output_dir +'/checkpoint.pth')
+        torch.save(model.module, os.path.join(args.output_dir, 'model.pt'))
         summary_writer.close()
     return model
 
