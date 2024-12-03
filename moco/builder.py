@@ -22,6 +22,7 @@ class MoCo(nn.Module):
                  alpha=0, beta=0.0, compile=False,
                  norm='ln-none',
                  num_layers = 3,
+                 warmup = 10,
                  num_classes=1000):
         """
         dim: feature dimension (default: 256)
@@ -40,9 +41,11 @@ class MoCo(nn.Module):
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
         self.filter = Filter(self.num_classes,dim)
         self.norm = norm
+        self.warmup = warmup
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
         self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
+
         
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
@@ -106,7 +109,7 @@ class MoCo(nn.Module):
         labels = (torch.arange(N, dtype=torch.long) + N * rank).cuda()
         return nn.CrossEntropyLoss()(logits, labels)
 
-    def forward(self, x1, x2, m,targets):
+    def forward(self, x1, x2, m, targets,epoch):
         """
         Input:
             x1: first views of images
@@ -136,6 +139,11 @@ class MoCo(nn.Module):
 
         instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
         loss  =  instance_loss
+
+        # during warmup, only train the filter
+        if epoch < self.warmup:
+            q1 = q1.detach()
+            q2 = q2.detach()
 
         if self.beta>0:
             # disparate contrast

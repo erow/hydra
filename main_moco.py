@@ -465,7 +465,7 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
 
         # compute output
         with torch.cuda.amp.autocast(True):
-            loss,log = model(images[0], images[1], moco_m, targets=targets)
+            loss,log = model(images[0], images[1], moco_m, targets=targets,epoch=epoch)
 
         losses.update(loss.item(), images[0].size(0))
         if (args.rank == 0 or not args.multiprocessing_distributed) and summary_writer:
