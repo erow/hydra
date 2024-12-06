@@ -5,3 +5,4 @@ torchvision
 wandb
 timm
 gin-config
+pycocotools
