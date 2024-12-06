@@ -8,6 +8,7 @@
 
 import argparse
 import builtins
+from pathlib import Path
 import gin
 import math
 import os
@@ -40,9 +41,17 @@ import moco.optimizer
 import datetime 
 
 import vits
+import numpy as np
 
-from multiloader import MultiLoader
-import ffcv_transform
+
+class Coco(datasets.CocoCaptions):
+    def load_embeddings(self,file_path):
+        self.embeddings = torch.load(file_path)
+    def __getitem__(self, index):
+        img, _ = super().__getitem__(index)
+        embeds = self.embeddings[index]
+        idx = np.random.randint(0,len(embeds))
+        return img, embeds[idx]
 
 
 torchvision_model_names = sorted(name for name in torchvision_models.__dict__
@@ -57,6 +66,7 @@ parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffc
 parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
+parser.add_argument("--embed_file", type=str, required=True)
 parser.add_argument("--aug", default="default", type=str, choices=["default","simple"])
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
@@ -108,8 +118,8 @@ parser.add_argument('--multiprocessing-distributed', action='store_true',
                          'multi node data parallel training')
 
 # moco specific configs:
-parser.add_argument('--moco-dim', default=256, type=int,
-                    help='feature dimension (default: 256)')
+parser.add_argument('--moco-dim', default=512, type=int,
+                    help='feature dimension (default: 512)')
 parser.add_argument('--moco-mlp-dim', default=4096, type=int,
                     help='hidden dimension in MLPs (default: 4096)')
 parser.add_argument('--moco-m', default=0.99, type=float,
@@ -257,12 +267,13 @@ def main_worker(gpu, ngpus_per_node, args):
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
+    traindir = args.data
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
     # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
     if args.aug == 'default':
+
         augmentation1 = [
             transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
             transforms.RandomApply([
@@ -294,46 +305,21 @@ def main_worker(gpu, ngpus_per_node, args):
             normalize
         ]
         augmentation2 = augmentation1
-
-    if (args.data_set =='ffcv'):
-        if args.aug == 'default':
-            pipelines = ffcv_transform.MultiviewPipeline(args.img_size, scale=(args.crop_min, 1.))
-        else:
-            pipelines = ffcv_transform.SimpleMultiviewPipeline(args.img_size, scale=(args.crop_min, 1.))
-        train_loader = MultiLoader(
-            args.data,
-            batch_size=args.batch_size,
-            num_workers=args.workers,
-            order=ffcv_transform.OrderOption.RANDOM,
-            distributed=args.distributed,
-            seed=args.seed,
-            pipelines=pipelines,
-            drop_last=True,
-            batches_ahead=3
-        )
-        pass
     else:
-        if (args.data_set =='STL'):
-            train_dataset = datasets.STL10(
-                args.data,
-                split='train',
-                download=True,
-                transform=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                            transforms.Compose(augmentation2)))
-        else:
-            train_dataset = datasets.ImageFolder(
-                traindir,
-                moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                            transforms.Compose(augmentation2)))
+        raise NotImplementedError("augmentation not supported: {}".format(args.aug))
 
-        if args.distributed:
-            train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
-        else:
-            train_sampler = None
+    year = 2014
+    train_dataset = Coco(root=os.path.join(traindir,'images',f"train{year}"), 
+                               annFile=os.path.join(traindir,'annotations',f"captions_train{year}.json"),
+                                 transform=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
+                                    transforms.Compose(augmentation2)))
+    train_dataset.load_embeddings(args.embed_file)
+    if args.distributed:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
 
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
-            num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
         
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed and not (args.data_set =='ffcv'):
@@ -443,14 +429,11 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
     iters_per_epoch = len(train_loader)
     moco_m = args.moco_m
     for i, batch in enumerate(train_loader):
-        if (args.data_set =='ffcv'):
-            images, targets = batch[:-1], batch[-1]
-            targets = targets.cuda(args.gpu,non_blocking=True)
-        else:
-            images, targets = batch
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
-            targets = targets.cuda(args.gpu,non_blocking=True)
+        
+        images, targets = batch
+        images[0] = images[0].cuda(args.gpu, non_blocking=True)
+        images[1] = images[1].cuda(args.gpu, non_blocking=True)
+        targets = targets.cuda(args.gpu,non_blocking=True)
             
         # measure data loading time
         data_time.update(time.time() - end)

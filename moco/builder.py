@@ -18,14 +18,15 @@ class MoCo(nn.Module):
     https://arxiv.org/abs/1911.05722
     """
     def __init__(self, base_encoder, 
-                 dim=256, mlp_dim=4096, T=1.0, 
+                 dim=512, mlp_dim=4096, T=1.0, 
                  alpha=0, beta=0.0, compile=False,
                  norm='ln-none',
                  num_layers = 3,
                  warmup = 10,
-                 num_classes=1000):
+                 clip=False,
+                 num_classes=512):
         """
-        dim: feature dimension (default: 256)
+        dim: feature dimension (default: 512 the same as the caption embedding)
         mlp_dim: hidden dimension in MLPs (default: 4096)
         T: softmax temperature (default: 1.0)
         """
@@ -35,6 +36,7 @@ class MoCo(nn.Module):
         self.alpha=alpha
         self.beta = beta
         self.num_classes=num_classes
+        self.clip=clip
         self.num_layers = num_layers 
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
@@ -44,7 +46,7 @@ class MoCo(nn.Module):
         self.warmup = warmup
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
-        self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
+        self.scale_logit = nn.Parameter(torch.zeros(1)-np.log(T))
 
         
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
@@ -103,11 +105,25 @@ class MoCo(nn.Module):
         # gather all targets
         k = concat_all_gather(k)
         # Einstein sum is more intuitive
-        logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
+        scale =  self.scale_logit.exp()
+        logits = torch.einsum('nc,mc->nm', [q, k]) * scale
         N = logits.shape[0]  # batch size per GPU
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         labels = (torch.arange(N, dtype=torch.long) + N * rank).cuda()
         return nn.CrossEntropyLoss()(logits, labels)
+
+
+    def disparate_loss(self, z1, k2, y1, posy):
+        k2 = concat_all_gather(k2)
+        fz1,fz2 = self.filter(z1, k2, y1,posy)
+        
+        scale = self.scale_logit.exp()
+        logits = scale * self.filter.contrast(fz1,fz2)
+        N = z1.shape[0]
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        labels = (torch.arange(N, dtype=torch.long) + N * rank).cuda()
+        return nn.CrossEntropyLoss()(logits, labels)
+        
 
     def forward(self, x1, x2, m, targets,epoch):
         """
@@ -130,76 +146,33 @@ class MoCo(nn.Module):
         z2 = self.base_encoder(x2)
         q1 = self.predictor(z1)
         q2 = self.predictor(z2)
-        with torch.no_grad():  # no gradient
-            self._update_momentum_encoder(m)  # update the momentum encoder
 
-            # compute momentum features as targets
-            k1 = self.momentum_encoder(x1).contiguous()
-            k2 = self.momentum_encoder(x2).contiguous()
+        if self.clip:
+            loss = (self.contrastive_loss(q1, y) + self.contrastive_loss(q2, y))/2
 
-        instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
-        loss  =  instance_loss
+        else:
+            with torch.no_grad():  # no gradient
+                self._update_momentum_encoder(m)  # update the momentum encoder
 
-        # during warmup, only train the filter
-        if epoch < self.warmup:
-            q1 = q1.detach()
-            q2 = q2.detach()
+                # compute momentum features as targets
+                k1 = self.momentum_encoder(x1).contiguous()
+                k2 = self.momentum_encoder(x2).contiguous()
 
-        if self.beta>0:
             # disparate contrast
-            disparate_loss = (
+            loss = (
                 self.disparate_loss(q1,k2,y,sy) + 
                 self.disparate_loss(q2,k1,y,sy))/2
-            
-            loss += self.beta * disparate_loss
-        if self.alpha>0:
-            class_loss = (self.disparate_loss(q1,k2,y,y) + 
-                        self.disparate_loss(q2,k1,y,y))/2
-            loss += self.alpha * class_loss
 
-        loss /= (1 + self.alpha + self.beta)
-
-        C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
+       
         with torch.no_grad():
-            activation, entropy = self.filter.gate.statistics()
-            self.log['activation'] = activation.item()
-            self.log['entropy'] = entropy.item()
-            self.log['ins'] = C - instance_loss.item() 
-            if self.beta>0:
-                self.log['dis'] = C - disparate_loss.item() 
-            if self.alpha>0:
-                self.log['cls'] = C - class_loss.item() 
+            # activation, entropy = self.filter.gate.statistics()
+            # self.log['activation'] = activation.item()
+            # self.log['entropy'] = entropy.item()
             self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         return loss, self.log
     
-    def disparate_loss(self, z1, k2, y1, posy):
-        k2 = concat_all_gather(k2)
-        fz1,fz2 = self.filter(z1, k2, y1,posy)
-        
-        scale = self.scale_logit.exp()
-        logits = scale * self.filter.contrast(fz1,fz2)
-        
-        
-        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y1
-        c2_mask = (posy.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y2
-        class_mask = c1_mask|c2_mask
 
-        loss = multipos_ce_loss(logits,c2_mask,class_mask)
-        return loss
-    
-
-    def class_loss(self,z1,k2,y1,y2):
-        k2 = concat_all_gather(k2)
-
-        fz1,fz2 = self.filter(z1, k2, y1)
-
-        scale = 1/self.T
-        logits = scale * self.filter.contrast(fz1,fz2)
-
-        pos_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y1
-        loss = multipos_ce_loss(logits,pos_mask,pos_mask)
-        return loss
 
     
 

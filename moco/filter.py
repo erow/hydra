@@ -29,18 +29,10 @@ class BasicGate(OpenGate):
             nn.ReLU(), nn.BatchNorm1d(mlp_dim),
             nn.Linear(mlp_dim, embed_dim),            
         )
-        self.label_embedding = nn.Embedding(num_classes,in_dim)
+        self.label_embedding = nn.Linear(num_classes,in_dim)
         self.lam = lam
         self.fuse = fuse
-
-    def statistics(self):
-        labels = torch.arange(self.num_classes).cuda()
-        label_embeds = self.label_embedding(labels)
-        logits = self.mlp(label_embeds)
-        gates = logits.sigmoid()
-        activation = gates.sum(1).mean()
-        entropy = torch.distributions.Bernoulli(gates).entropy().mean()
-        return activation, entropy
+    
     
     def forward(self,y1,y2=None,log=None):
         if self.fuse:      
