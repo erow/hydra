@@ -32,13 +32,13 @@ done
 
 ######## norm layer ##########
 ## we study the effect of the normalization layer at the end of the projector and the predictor
-# export WANDB_TAGS="vitt,norm"
-# for norm in "bn-none" "bn-ln" "ln-none" "ln-ln" "bn-bn"; do
+export WANDB_TAGS="vitt,norm"
+for norm in "bn-none" "bn-ln" "ln-none" "ln-ln" "bn-bn"; do
 
-#     WANDB_NAME=hydra_${norm} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=100 MoCo.norm=\'${norm}\'  --output_dir $OUTDIR/design/hydra_${norm}   --data_set ffcv $train_path
+    WANDB_NAME=hydra_${norm} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=100 MoCo.norm=\'${norm}\'  --output_dir $OUTDIR/design/hydra_${norm}   --data_set ffcv $train_path
 
 #     WANDB_NAME=moco_${norm} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=0 MoCo.norm=\'${norm}\'  --output_dir $OUTDIR/moco_${norm}   --data_set ffcv $train_path
-# done
+done
 
 ######## projector ##########
 ## we study the effect of the projector on the performance of the model
@@ -57,3 +57,11 @@ export WANDB_TAGS="vitt,beta"
 for beta in 0 1 10; do
     WANDB_NAME=hydra_beta${beta} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=${beta}  --output_dir $OUTDIR/design/hydra_beta${beta}   --data_set ffcv $train_path
 done
+
+######## dim ##########
+export WANDB_TAGS="vitt,dim"
+for dim in 128 512 1024; do
+    WANDB_NAME=hydra_d${dim} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.dim=${dim}  --output_dir $OUTDIR/design/hydra_d${dim}   --data_set ffcv $train_path
+done
+
+
