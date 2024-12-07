@@ -22,8 +22,7 @@ class MoCo(nn.Module):
                  alpha=0, beta=0.0, compile=False,
                  norm='ln-none',
                  num_layers = 3,
-                 warmup = 10,
-                 clip=False,
+                 clip=False,                 
                  num_classes=512):
         """
         dim: feature dimension (default: 512 the same as the caption embedding)
@@ -43,7 +42,6 @@ class MoCo(nn.Module):
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
         self.filter = Filter(self.num_classes,dim)
         self.norm = norm
-        self.warmup = warmup
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
         self.scale_logit = nn.Parameter(torch.zeros(1)-np.log(T))
@@ -159,10 +157,15 @@ class MoCo(nn.Module):
                 k2 = self.momentum_encoder(x2).contiguous()
 
             # disparate contrast
-            loss = (
-                self.disparate_loss(q1,k2,y,sy) + 
-                self.disparate_loss(q2,k1,y,sy))/2
 
+            disparate_loss = (
+                self.disparate_loss(q1,k2[shuffle_idx],y,sy) + 
+                self.disparate_loss(q2,k1[shuffle_idx],y,sy))/2
+            instance_loss = (self.contrastive_loss(q1, k1) + self.contrastive_loss(q2, k2))/2
+            loss = (disparate_loss * self.beta + instance_loss)/(1+self.beta)
+
+            self.log['dis_loss'] = disparate_loss.item()
+            self.log['ins_loss'] = instance_loss.item()
        
         with torch.no_grad():
             # activation, entropy = self.filter.gate.statistics()

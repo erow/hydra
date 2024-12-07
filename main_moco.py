@@ -238,8 +238,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # warn: hard coding 
     if (args.rank == 0 or not args.multiprocessing_distributed) and args.output_dir:
         import wandb
-        wandb.init(dir=args.output_dir, job_type='train',config=args.__dict__,
-                   entity='dlib', project="hydra",
+        wandb.init(dir=args.output_dir, job_type='train',config=args.__dict__,                   
                sync_tensorboard=True,resume=args.resume is not None)
         summary_writer = SummaryWriter(args.output_dir) 
     else:
