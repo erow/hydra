@@ -65,3 +65,11 @@ for dim in 128 512 1024; do
 done
 
 
+##### model size ######
+WANDB_NAME=hydra_vitt $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --output_dir $OUTDIR/hydra_vitt   --data_set ffcv $train_path
+
+WANDB_NAME=hydra_vits $launcher main_moco.py  -a vit_small -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --output_dir $OUTDIR/hydra_vits   --data_set ffcv $train_path
+
+
+WANDB_NAME=hydra_vitb $launcher main_moco.py  -a vit_base -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --output_dir $OUTDIR/hydra_vitb   --data_set ffcv $train_path
+
