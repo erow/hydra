@@ -10,9 +10,8 @@ import torch.nn as nn
 from functools import partial, reduce
 from operator import mul
 
-from timm.models.vision_transformer import VisionTransformer, _cfg
-from timm.models.layers import to_2tuple
-from timm.models.layers import PatchEmbed
+from timm.models.vision_transformer import VisionTransformer, _cfg, resample_abs_pos_embed
+from timm.models.layers import to_2tuple, PatchEmbed
 
 __all__ = [
     'vit_tiny',
@@ -70,6 +69,41 @@ class VisionTransformerMoCo(VisionTransformer):
         self.pos_embed = nn.Parameter(torch.cat([pe_token, pos_emb], dim=1))
         self.pos_embed.requires_grad = False
 
+    def _pos_embed(self, x: torch.Tensor) -> torch.Tensor:
+        if self.pos_embed is None:
+            return x.view(x.shape[0], -1, x.shape[-1])
+
+        if self.dynamic_img_size:
+            B, H, W, C = x.shape
+            pos_embed = resample_abs_pos_embed(
+                self.pos_embed,
+                (H, W),
+                num_prefix_tokens=0 if self.no_embed_class else self.num_prefix_tokens,
+            )
+            x = x.view(B, -1, C)
+        else:
+            pos_embed = self.pos_embed
+
+        to_cat = self.to_cat
+
+        x = x + pos_embed[:, 1:]
+        if to_cat:
+            x = torch.cat(to_cat + [x], dim=1)
+
+        return self.pos_drop(x)
+    
+    def forward(self, x,cond=None):
+        if cond is None:
+            self.to_cat = [self.cls_token.expand(x.shape[0], -1, -1)]
+        else:
+            self.to_cat = [cond]
+        x = self.forward_features(x)
+        if cond is None:
+            return self.head(self.fc_norm(x[:, 0]))
+        else:
+            b,l,_ = cond.shape
+            z = x[:, :l].reshape(b*l,-1)
+            return self.head(self.fc_norm(z)).reshape(b,l,-1)
 
 class ConvStem(nn.Module):
     """ 

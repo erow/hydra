@@ -19,10 +19,10 @@ class MoCo(nn.Module):
     """
     def __init__(self, base_encoder, 
                  dim=256, mlp_dim=4096, T=1.0, 
-                 alpha=0, beta=0.0, compile=False,
+                 alpha=0, beta=0.0, 
                  norm='ln-none',
                  num_layers = 3,
-                 warmup = 10,
+                 num_negs = 50,
                  num_classes=1000):
         """
         dim: feature dimension (default: 256)
@@ -39,23 +39,17 @@ class MoCo(nn.Module):
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
-        self.filter = Filter(self.num_classes,dim)
+        self.label_embed = nn.Embedding(self.base_encoder.num_classes, self.base_encoder.embed_dim)
         self.norm = norm
-        self.warmup = warmup
+        self.num_negs = num_negs
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
-        self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
+        self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(1/self.T))
 
         
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
             param_m.requires_grad = False  # not update by gradient
-        
-        if compile:
-            self.base_encoder = torch.compile(self.base_encoder)
-            self.momentum_encoder = torch.compile(self.momentum_encoder)
-            self.filter = torch.compile(self.filter)
-            self.predictor = torch.compile(self.predictor)
     
     @torch.no_grad()
     def representation(self, x):
@@ -98,15 +92,13 @@ class MoCo(nn.Module):
 
     def contrastive_loss(self, q, k):
         # normalize
-        q = nn.functional.normalize(q, dim=1)
-        k = nn.functional.normalize(k, dim=1)
-        # gather all targets
-        k = concat_all_gather(k)
+        q = nn.functional.normalize(q, dim=-1)
+        k = nn.functional.normalize(k, dim=-1)        
         # Einstein sum is more intuitive
-        logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
+        scale = self.scale_logit.exp()
+        logits = torch.einsum('bc,bnc->bn', [q, k]) * scale
         N = logits.shape[0]  # batch size per GPU
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        labels = (torch.arange(N, dtype=torch.long) + N * rank).cuda()
+        labels = (torch.zeros(N, dtype=torch.long) ).cuda()
         return nn.CrossEntropyLoss()(logits, labels)
 
     def forward(self, x1, x2, m, targets,epoch):
@@ -121,9 +113,7 @@ class MoCo(nn.Module):
 
         self.log = {}
         # shuffle trick, compose a positive pair from a random sample of the batch
-        shuffle_idx = torch.randperm(len(x1)).to(x1.device)
         y = targets.clone()
-        sy = targets[shuffle_idx].contiguous()
         
         # compute features
         z1 = self.base_encoder(x1)
@@ -133,74 +123,24 @@ class MoCo(nn.Module):
         with torch.no_grad():  # no gradient
             self._update_momentum_encoder(m)  # update the momentum encoder
 
+        ## warning: no update on the label embedding
             # compute momentum features as targets
-            k1 = self.momentum_encoder(x1)
-            k2 = self.momentum_encoder(x2)
+            # we create n-1 label tokens
+            cond = torch.randint(0,self.num_classes-1,(len(y),self.num_negs-1),device=y.device)
+            cond[cond>=y[:,None]] += 1 ## shift the label to make sure cond!=y
+            cond = torch.cat([y[:,None],cond],dim=1) # add the positive label
+        
+        cond = self.label_embed(cond)
+        k1 = self.momentum_encoder(x1,cond) # B x N x D
+        k2 = self.momentum_encoder(x2,cond)
 
-        instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
-        loss  =  instance_loss
-
-        # during warmup, only train the filter
-        if epoch < self.warmup:
-            q1 = q1.detach()
-            q2 = q2.detach()
-
-        if self.beta>0:
-            # disparate contrast
-            disparate_loss = (
-                self.disparate_loss(q1,k2,y,sy) + 
-                self.disparate_loss(q2,k1,y,sy))/2
-            
-            loss += self.beta * disparate_loss
-        if self.alpha>0:
-            class_loss = (self.disparate_loss(q1,k2,y,y) + 
-                        self.disparate_loss(q2,k1,y,y))/2
-            loss += self.alpha * class_loss
-
-        loss /= (1 + self.alpha + self.beta)
-
-        C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
+        loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
+        
         with torch.no_grad():
-            activation, entropy = self.filter.gate.statistics()
-            self.log['activation'] = activation.item()
-            self.log['entropy'] = entropy.item()
-            self.log['ins'] = C - instance_loss.item() 
-            if self.beta>0:
-                self.log['dis'] = C - disparate_loss.item() 
-            if self.alpha>0:
-                self.log['cls'] = C - class_loss.item() 
             self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
+            self.log['qk@sim'] = nn.functional.cosine_similarity(q1,k1[:,0]).mean().item()
         return loss, self.log
-    
-    def disparate_loss(self, z1, k2, y1, posy):
-        k2 = concat_all_gather(k2)
-        fz1,fz2 = self.filter(z1, k2, y1,posy)
-        
-        scale = self.scale_logit.exp()
-        logits = scale * self.filter.contrast(fz1,fz2)
-        
-        
-        c1_mask = (y1.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y1
-        c2_mask = (posy.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y2
-        class_mask = c1_mask|c2_mask
-
-        loss = multipos_ce_loss(logits,c2_mask,class_mask)
-        return loss
-    
-
-    def class_loss(self,z1,k2,y1,y2):
-        k2 = concat_all_gather(k2)
-
-        fz1,fz2 = self.filter(z1, k2, y1)
-
-        scale = 1/self.T
-        logits = scale * self.filter.contrast(fz1,fz2)
-
-        pos_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y1
-        loss = multipos_ce_loss(logits,pos_mask,pos_mask)
-        return loss
-
     
 
 class MoCo_ResNet(MoCo):
