@@ -73,3 +73,20 @@ WANDB_NAME=hydra_vits $launcher main_moco.py  -a vit_small -b 1024   --optimizer
 
 WANDB_NAME=hydra_vitb $launcher main_moco.py  -a vit_base -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --output_dir $OUTDIR/hydra_vitb   --data_set ffcv $train_path
 
+################# evaluation #################
+export WANDB_TAGS="vitt,norm"
+for MODELPATH in ../outputs/design/*/ ; do
+    MODEL=$(basename $MODELPATH)
+    echo WANDB_NAME=${MODEL}-IN1K $launcher eval_linear.py --data_set=IN1K --data_location ~/data/ImageNet --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/IN1K 
+
+    WANDB_NAME=${MODEL}-CIFAR10 $launcher eval_linear_lbfgs.py --data_set=CIFAR10 --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/CIFAR10
+
+    ## Pets
+    WANDB_NAME=${MODEL}-Pets $launcher eval_linear_lbfgs.py --data_set=Pets --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/Pets
+
+    ## Flowers
+    WANDB_NAME=${MODEL}-FLW $launcher eval_linear_lbfgs.py --data_set=Flowers --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/Flowers
+
+    ## DTD
+    WANDB_NAME=${MODEL}-DTD $launcher eval_linear_lbfgs.py --data_set=DTD --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/DTD
+done
