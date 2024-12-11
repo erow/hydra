@@ -21,8 +21,7 @@ class MoCo(nn.Module):
                  dim=512, mlp_dim=4096, T=1.0, 
                  alpha=0, beta=0.0, compile=False,
                  norm='ln-none',
-                 num_layers = 3,
-                 clip=False,                 
+                 num_layers = 3,           
                  num_classes=512):
         """
         dim: feature dimension (default: 512 the same as the caption embedding)
@@ -35,7 +34,6 @@ class MoCo(nn.Module):
         self.alpha=alpha
         self.beta = beta
         self.num_classes=num_classes
-        self.clip=clip
         self.num_layers = num_layers 
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
@@ -145,27 +143,28 @@ class MoCo(nn.Module):
         q1 = self.predictor(z1)
         q2 = self.predictor(z2)
 
-        if self.clip:
-            loss = (self.contrastive_loss(q1, y) + self.contrastive_loss(q2, y))/2
+        
+        clip_loss = (self.contrastive_loss(q1, y) + self.contrastive_loss(q2, y))/2
 
-        else:
-            with torch.no_grad():  # no gradient
-                self._update_momentum_encoder(m)  # update the momentum encoder
+        
+        with torch.no_grad():  # no gradient
+            self._update_momentum_encoder(m)  # update the momentum encoder
 
-                # compute momentum features as targets
-                k1 = self.momentum_encoder(x1).contiguous()
-                k2 = self.momentum_encoder(x2).contiguous()
+            # compute momentum features as targets
+            k1 = self.momentum_encoder(x1).contiguous()
+            k2 = self.momentum_encoder(x2).contiguous()
 
-            # disparate contrast
+        # disparate contrast
 
-            disparate_loss = (
-                self.disparate_loss(q1,k2[shuffle_idx],y,sy) + 
-                self.disparate_loss(q2,k1[shuffle_idx],y,sy))/2
-            instance_loss = (self.contrastive_loss(q1, k1) + self.contrastive_loss(q2, k2))/2
-            loss = (disparate_loss * self.beta + instance_loss)/(1+self.beta)
+        disparate_loss = (
+            self.disparate_loss(q1,k2[shuffle_idx],y,sy) + 
+            self.disparate_loss(q2,k1[shuffle_idx],y,sy))/2
+        instance_loss = (self.contrastive_loss(q1, k1) + self.contrastive_loss(q2, k2))/2
+        loss = (clip_loss + disparate_loss * self.beta + instance_loss * self.alpha)/(1 + self.beta + self.alpha)
 
-            self.log['dis_loss'] = disparate_loss.item()
-            self.log['ins_loss'] = instance_loss.item()
+        self.log['dis_loss'] = disparate_loss.item()
+        self.log['ins_loss'] = instance_loss.item()
+        self.log['clip_loss'] = clip_loss.item()
        
         with torch.no_grad():
             # activation, entropy = self.filter.gate.statistics()
