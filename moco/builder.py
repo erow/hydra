@@ -8,7 +8,8 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-from .filter import Filter, ConvFilter
+import torch.nn.functional as F
+from moco.filter import Filter, ConvFilter
 import gin
 
 @gin.configurable(denylist=['dim','mlp_dim','T'])
@@ -23,6 +24,7 @@ class MoCo(nn.Module):
                  norm='ln-none',
                  num_layers = 3,
                  warmup = 10,
+                 learnable=True,
                  num_classes=1000):
         """
         dim: feature dimension (default: 256)
@@ -36,6 +38,7 @@ class MoCo(nn.Module):
         self.beta = beta
         self.num_classes=num_classes
         self.num_layers = num_layers 
+        self.learnable = learnable
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
@@ -46,10 +49,15 @@ class MoCo(nn.Module):
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
         self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
 
+        # self.predictor_dis = self._build_mlp(2, dim, mlp_dim, dim, 'none')
         
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
             param_m.requires_grad = False  # not update by gradient
+        
+        self.register_buffer('class_vector', 
+            torch.zeros(self.num_classes, dim))
+        self.momentum = 0.9
         
         if compile:
             self.base_encoder = torch.compile(self.base_encoder)
@@ -106,7 +114,7 @@ class MoCo(nn.Module):
         logits = torch.einsum('nc,mc->nm', [q, k]) / self.T
         N = logits.shape[0]  # batch size per GPU
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        labels = (torch.arange(N, dtype=torch.long) + N * rank).cuda()
+        labels = (torch.arange(N, dtype=torch.long) + N * rank).to(q.device)
         return nn.CrossEntropyLoss()(logits, labels)
 
     def forward(self, x1, x2, m, targets,epoch):
@@ -152,6 +160,7 @@ class MoCo(nn.Module):
                 self.disparate_loss(q2,k1,y,sy))/2
             
             loss += self.beta * disparate_loss
+
         if self.alpha>0:
             class_loss = (self.disparate_loss(q1,k2,y,y) + 
                         self.disparate_loss(q2,k1,y,y))/2
@@ -161,9 +170,9 @@ class MoCo(nn.Module):
 
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
         with torch.no_grad():
-            activation, entropy = self.filter.gate.statistics()
-            self.log['activation'] = activation.item()
-            self.log['entropy'] = entropy.item()
+            # activation, entropy = self.filter.gate.statistics()
+            # self.log['activation'] = activation.item()
+            # self.log['entropy'] = entropy.item()
             self.log['ins'] = C - instance_loss.item() 
             if self.beta>0:
                 self.log['dis'] = C - disparate_loss.item() 
@@ -174,6 +183,28 @@ class MoCo(nn.Module):
         return loss, self.log
     
     def disparate_loss(self, z1, k2, y1, posy):
+        if not self.learnable:
+            # update the class representation
+            self.class_vector.data = self.momentum * self.class_vector + (1-self.momentum) * mean_representation(k2, y1, self.num_classes)
+            # select the dimensions with positive contribution
+            cls_sim = torch.einsum('id,jd->ijd', self.class_vector, self.class_vector)
+            # optimize a random class pair
+            while True:
+                i,j = torch.randint(0, self.num_classes, (2,))
+                if (y1 == i).sum() > 0 and (y1 == j).sum() > 0:
+                    break
+            gates = (cls_sim[i,j] > 0.05).float() 
+
+            bp1 = z1[y1 == i]
+            bp2 = z1[y1 == j]
+            bz1 = k2[y1 == i]
+            bz2 = k2[y1 == j]
+
+            sim_z = ( cross_cosine_similarity(bp1*gates,bz2.detach()*gates)+
+                    cross_cosine_similarity(bp2*gates,bz1.detach()*gates))/2
+            self.log['activation'] = gates.sum().item()
+            return 1 - sim_z
+
         k2 = concat_all_gather(k2)
         fz1,fz2 = self.filter(z1, k2, y1,posy)
         
@@ -262,3 +293,39 @@ def multipos_ce_loss(logits, pos_mask,exclude_mask=None):
     loss = loss.mean()
    
     return loss
+
+
+
+@torch.jit.script
+def mean_representation(z, y, num_classes: int=25):
+    # 105 µs ± 3.82 µs
+    # Create one-hot encoding for the class labels
+    one_hot = torch.nn.functional.one_hot(y, num_classes).float()
+    
+    # Calculate the sum of representations for each class
+    class_sums = torch.matmul(one_hot.t(), z)
+    
+    # Calculate the count of each class
+    class_counts = one_hot.sum(dim=0).unsqueeze(1)
+    
+    # Avoid division by zero by replacing zero counts with ones
+    class_counts[class_counts == 0] = 1
+    
+    # Calculate the mean representation for each class
+    class_vector = class_sums / class_counts
+    
+    return class_vector
+
+def cross_cosine_similarity(x, y):
+    x = F.normalize(x, p=2, dim=-1)
+    y = F.normalize(y, p=2, dim=-1)
+    sim = x @ y.t()
+    return sim.mean()
+
+
+if __name__ == "__main__":
+    from torchvision.models import resnet18
+    model = MoCo_ResNet(resnet18,learnable=False,beta=100)
+    x1 = torch.randn(10,3,224,224)
+    x2 = torch.randn(10,3,224,224)
+    print( model(x1,x2,0.9,torch.randint(0,10,(10,)),0))

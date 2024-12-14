@@ -13,6 +13,10 @@ export launcher="echo" # dry run
 WANDB_NAME=hydra_vitt_baseline $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=100 MoCo.norm=\'ln-none\'  --output_dir $OUTDIR/design/hydra_vitt_baseline   --data_set ffcv $train_path
 
 ######## batch size ##########
+WANDB_NAME=hydra_vitt_sim $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=100 MoCo.norm=\'ln-none\'  --output_dir $OUTDIR/design/hydra_vitt_sim   --data_set ffcv $train_path
+
+
+######## batch size ##########
 ## we study the effect of the batch size on the performance of the model
 export WANDB_TAGS="vitt,bs"
 for bs in 2048 4096 8192; do
