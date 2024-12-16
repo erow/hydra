@@ -20,11 +20,14 @@ class MoCo(nn.Module):
     """
     def __init__(self, base_encoder, 
                  dim=256, mlp_dim=4096, T=1.0, 
-                 alpha=0, beta=0.0, compile=False,
+                 alpha=0, beta=0.0, 
+                 gamma=0.0,
                  norm='ln-none',
                  num_layers = 3,
                  warmup = 10,
-                 learnable=True,
+                 sep = False,
+                 learnable=True, 
+                 compile=False,
                  num_classes=1000):
         """
         dim: feature dimension (default: 256)
@@ -36,6 +39,8 @@ class MoCo(nn.Module):
         self.T = T
         self.alpha=alpha
         self.beta = beta
+        self.gamma = gamma
+        self.sep = sep
         self.num_classes=num_classes
         self.num_layers = num_layers 
         self.learnable = learnable
@@ -47,9 +52,9 @@ class MoCo(nn.Module):
         self.warmup = warmup
 
         self._build_projector_and_predictor_mlps(dim, mlp_dim)
+        if self.sep:
+            self.predictor_dis = self._build_mlp(2, dim, mlp_dim, dim, norm.split('-')[1])
         self.scale_logit = nn.Parameter(torch.zeros(1)+np.log(20))
-
-        # self.predictor_dis = self._build_mlp(2, dim, mlp_dim, dim, 'none')
         
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
@@ -152,6 +157,11 @@ class MoCo(nn.Module):
         if epoch < self.warmup:
             q1 = q1.detach()
             q2 = q2.detach()
+
+        if self.sep:
+            # separated predictor
+            q1 = self.predictor_dis(z1)
+            q2 = self.predictor_dis(z2)
 
         if self.beta>0:
             # disparate contrast
@@ -325,7 +335,7 @@ def cross_cosine_similarity(x, y):
 
 if __name__ == "__main__":
     from torchvision.models import resnet18
-    model = MoCo_ResNet(resnet18,learnable=False,beta=100)
+    model = MoCo_ResNet(resnet18,sep=True,beta=1)
     x1 = torch.randn(10,3,224,224)
     x2 = torch.randn(10,3,224,224)
     print( model(x1,x2,0.9,torch.randint(0,10,(10,)),0))
