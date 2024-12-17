@@ -189,7 +189,7 @@ def main_worker(gpu, ngpus_per_node, args):
     
     # infer learning rate before changing batch size
     args.lr = args.lr * args.batch_size / 256
-
+    
     if not torch.cuda.is_available():
         print('using CPU, this will be slow')
     elif args.distributed:
@@ -205,7 +205,8 @@ def main_worker(gpu, ngpus_per_node, args):
         # ourselves based on the total number of GPUs we have
         args.batch_size = int(args.batch_size / args.world_size)
         args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu],find_unused_parameters=True)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu],find_unused_parameters=True,
+                                                          static_graph=True)
     elif args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
@@ -215,7 +216,7 @@ def main_worker(gpu, ngpus_per_node, args):
         # AllGather/rank implementation in this code only supports DistributedDataParallel.
         raise NotImplementedError("Only DistributedDataParallel is supported.")
     # print(model) # print model after SyncBatchNorm
-
+    
     if args.optimizer == 'lars':
         optimizer = moco.optimizer.LARS(model.parameters(), args.lr,
                                         weight_decay=args.weight_decay,

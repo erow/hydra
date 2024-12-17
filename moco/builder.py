@@ -24,10 +24,11 @@ class MoCo(nn.Module):
                  gamma=0.0,
                  norm='ln-none',
                  num_layers = 3,
-                 warmup = 10,
+                 warmup = 0,
                  sep = False,
                  learnable=True, 
                  compile=False,
+                 grad_checkpointing=False,
                  num_classes=1000):
         """
         dim: feature dimension (default: 256)
@@ -46,6 +47,9 @@ class MoCo(nn.Module):
         self.learnable = learnable
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
+        if grad_checkpointing:
+            self.base_encoder.set_grad_checkpointing(True)
+        
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
         self.filter = Filter(self.num_classes,dim)
         self.norm = norm
@@ -139,16 +143,15 @@ class MoCo(nn.Module):
         sy = targets[shuffle_idx].contiguous()
         
         # compute features
-        z1 = self.base_encoder(x1)
-        z2 = self.base_encoder(x2)
+        xs = torch.cat([x1, x2], dim=0)
+        z1,z2 = self.base_encoder(xs).chunk(2)
         q1 = self.predictor(z1)
         q2 = self.predictor(z2)
         with torch.no_grad():  # no gradient
             self._update_momentum_encoder(m)  # update the momentum encoder
 
             # compute momentum features as targets
-            k1 = self.momentum_encoder(x1)
-            k2 = self.momentum_encoder(x2)
+            k1,k2 = self.momentum_encoder(xs).chunk(2)            
 
         instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
         loss  =  instance_loss
@@ -180,9 +183,9 @@ class MoCo(nn.Module):
 
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
         with torch.no_grad():
-            # activation, entropy = self.filter.gate.statistics()
-            # self.log['activation'] = activation.item()
-            # self.log['entropy'] = entropy.item()
+            activation, entropy = self.filter.gate.statistics()
+            self.log['activation'] = activation.item()
+            self.log['entropy'] = entropy.item()
             self.log['ins'] = C - instance_loss.item() 
             if self.beta>0:
                 self.log['dis'] = C - disparate_loss.item() 
@@ -190,6 +193,10 @@ class MoCo(nn.Module):
                 self.log['cls'] = C - class_loss.item() 
             self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
+        
+        if self.gamma>0:
+            loss += self.gamma * entropy
+
         return loss, self.log
     
     def disparate_loss(self, z1, k2, y1, posy):
@@ -335,7 +342,7 @@ def cross_cosine_similarity(x, y):
 
 if __name__ == "__main__":
     from torchvision.models import resnet18
-    model = MoCo_ResNet(resnet18,sep=True,beta=1)
+    model = MoCo_ResNet(resnet18,sep=True,beta=1,grad_checkpointing=True)
     x1 = torch.randn(10,3,224,224)
     x2 = torch.randn(10,3,224,224)
     print( model(x1,x2,0.9,torch.randint(0,10,(10,)),0))

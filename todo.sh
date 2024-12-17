@@ -2,7 +2,7 @@
 export WANDB_PROJECT=hydra
 export WANDB_ENTITY=dlib
 export OUTDIR=../outputs
-export train_path=IN1K_smart_500.ffcv
+export train_path=../outputs/data/IN1K_smart_500.ffcv
 # export launcher="sbatch -p a100 storchrun.sh 1" # launch jobs on slurm
 # launcher="torchrun --nproc_per_node=8 " # launch jobs on local machine
 export launcher="echo" # dry run
@@ -13,7 +13,7 @@ export launcher="echo" # dry run
 WANDB_NAME=hydra_vitt_baseline $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=100 MoCo.norm=\'ln-none\'  --output_dir $OUTDIR/design/hydra_vitt_baseline   --data_set ffcv $train_path
 
 ######## gate vector without learning ##########
-WANDB_NAME=hydra_vitt_gate $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=100 MoCo.learnable=False  --output_dir $OUTDIR/design/hydra_vitt_gate   --data_set ffcv $train_path
+WANDB_NAME=hydra_vitt_gate $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.learnable=False  --output_dir $OUTDIR/design/hydra_vitt_gate   --data_set ffcv $train_path
 
 ######## separated predictor ##########
 WANDB_NAME=hydra_vitt_sep $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.sep=True  --output_dir $OUTDIR/design/hydra_vitt_sep   --data_set ffcv $train_path
@@ -64,6 +64,13 @@ for beta in 0 1 10; do
     WANDB_NAME=hydra_beta${beta} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=${beta}  --output_dir $OUTDIR/design/hydra_beta${beta}   --data_set ffcv $train_path
 done
 
+# 17-12-2024
+######## gamma ##########
+export WANDB_TAGS="vitt,gamma"
+for G in 1 1e-1 1e-2; do
+    WANDB_NAME=hydra_g${dim} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.gamma=${G} MoCo.beta=1 --output_dir $OUTDIR/design/hydra_g${dim}   --data_set ffcv $train_path
+done
+
 ######## dim ##########
 export WANDB_TAGS="vitt,dim"
 for dim in 128 512 1024; do
@@ -72,27 +79,9 @@ done
 
 
 ##### model size ######
-WANDB_NAME=hydra_vitt $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --output_dir $OUTDIR/hydra_vitt   --data_set ffcv $train_path
+WANDB_NAME=hydra_vitt $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --seed=1 --output_dir $OUTDIR/hydra_vitt_s1   --data_set ffcv $train_path
 
-WANDB_NAME=hydra_vits $launcher main_moco.py  -a vit_small -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --output_dir $OUTDIR/hydra_vits   --data_set ffcv $train_path
+WANDB_NAME=hydra_vits $launcher main_moco.py  -a vit_small -b 4096   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.grad_checkpointing=True MoCo.norm=\'bn-ln\' --seed=1 --output_dir $OUTDIR/hydra_vits_s1   --data_set ffcv $train_path
 
 
-WANDB_NAME=hydra_vitb $launcher main_moco.py  -a vit_base -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.norm=\'bn-ln\'  --output_dir $OUTDIR/hydra_vitb   --data_set ffcv $train_path
-
-################# evaluation #################
-export WANDB_TAGS="vitt,norm"
-for MODELPATH in ../outputs/design/*/ ; do
-    MODEL=$(basename $MODELPATH)
-    echo WANDB_NAME=${MODEL}-IN1K $launcher eval_linear.py --data_set=IN1K --data_location ~/data/ImageNet --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/IN1K 
-
-    WANDB_NAME=${MODEL}-CIFAR10 $launcher eval_linear_lbfgs.py --data_set=CIFAR10 --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/CIFAR10
-
-    ## Pets
-    WANDB_NAME=${MODEL}-Pets $launcher eval_linear_lbfgs.py --data_set=Pets --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/Pets
-
-    ## Flowers
-    WANDB_NAME=${MODEL}-FLW $launcher eval_linear_lbfgs.py --data_set=Flowers --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/Flowers
-
-    ## DTD
-    WANDB_NAME=${MODEL}-DTD $launcher eval_linear_lbfgs.py --data_set=DTD --data_location ~/data --gin build_model.model_name="'vit_tiny_patch16_224'" --prefix 'module.momentum_encoder.(.*)' --checkpoint_key state_dict -w ../outputs/design/${MODEL}/checkpoint.pth --output_dir ${MODELPATH}/linear/DTD
-done
+WANDB_NAME=hydra_vitb $launcher main_moco.py  -a vit_base -b 4096  --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=1 MoCo.grad_checkpointing=True MoCo.norm=\'bn-ln\'  --seed=1 --output_dir $OUTDIR/hydra_vitb_s1    --data_set ffcv $train_path
