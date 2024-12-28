@@ -74,7 +74,7 @@ done
 ######## dim ##########
 export WANDB_TAGS="vitt,dim"
 for dim in 128 512 1024; do
-    WANDB_NAME=hydra_d${dim} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --moco-dim=${dim}  --output_dir $OUTDIR/design/hydra_d${dim}   --data_set ffcv $train_path
+    WANDB_NAME=hydra_d${dim} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --moco-dim=${dim} --gin MoCo.norm=\'bn-ln\' MoCo.beta=1 --output_dir $OUTDIR/design/hydra_d${dim}   --data_set ffcv $train_path
 done
 
 
