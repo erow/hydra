@@ -54,7 +54,7 @@ export WANDB_TAGS="vitt,proj"
 WANDB_NAME=hydra_proj1 $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.beta=100 MoCo.num_layers=1  --output_dir $OUTDIR/design/hydra_proj1   --data_set ffcv $train_path
 
 ## no projection
-WANDB_NAME=hydra_proj0 $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos -moco-dim=192 --moco-t=.2  --gin MoCo.beta=100 MoCo.num_layers=0 MoCo.norm=\'none-none\' --output_dir $OUTDIR/design/hydra_proj0   --data_set ffcv $train_path
+WANDB_NAME=hydra_proj0 $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-dim=192 --moco-t=.2  --gin MoCo.beta=100 MoCo.num_layers=0 MoCo.norm=\'none-none\' --output_dir $OUTDIR/design/hydra_proj0   --data_set ffcv $train_path
 
 
 ######## beta ##########
@@ -74,7 +74,7 @@ done
 ######## dim ##########
 export WANDB_TAGS="vitt,dim"
 for dim in 128 512 1024; do
-    WANDB_NAME=hydra_d${dim} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --gin MoCo.dim=${dim}  --output_dir $OUTDIR/design/hydra_d${dim}   --data_set ffcv $train_path
+    WANDB_NAME=hydra_d${dim} $launcher main_moco.py  -a vit_tiny -b 1024   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1   --epochs=300 --warmup-epochs=40   --stop-grad-conv1 --moco-m-cos --moco-t=.2  --moco-dim=${dim}  --output_dir $OUTDIR/design/hydra_d${dim}   --data_set ffcv $train_path
 done
 
 
