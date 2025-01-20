@@ -143,7 +143,7 @@ class Filter(nn.Module):
     def __init__(self,num_classes, embed_dim, gate_fn=BasicGate):
         super().__init__()
         self.embed_dim = embed_dim
-        self.gate = gate_fn(embed_dim,num_classes=num_classes)
+        self.gate = gate_fn(embed_dim)
     
     def forward(self, x1,x2,y1,y2=None):
         gate = self.gate(y1,y2)
@@ -163,13 +163,13 @@ class VisionGate(nn.Module):
                  lam = 0, fuse=True):
         super().__init__()
         
-        self.mlp = nn.Sequential(
-            nn.ReLU(), nn.BatchNorm1d(in_dim),
+        self.mlp = nn.Sequential(            
             nn.Linear(in_dim, mlp_dim),
             nn.ReLU(), nn.BatchNorm1d(mlp_dim),
             nn.Linear(mlp_dim, embed_dim),            
         )
-        self.label_embedding = convnextv2_atto(num_classes=embed_dim)
+        self.label_embedding = convnextv2_atto(pretrained=True,num_classes=0)
+        self.label_embedding.requires_grad_(False)
         self.lam = lam
         self.fuse = fuse
     

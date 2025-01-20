@@ -4,12 +4,13 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from functools import partial
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 import torch.nn.functional as F
-from moco.filter import Filter, ConvFilter
+from moco.filter import Filter, ConvFilter, VisionGate
 import gin
 
 @gin.configurable(denylist=['dim','mlp_dim','T'])
@@ -51,7 +52,8 @@ class MoCo(nn.Module):
             self.base_encoder.set_grad_checkpointing(True)
         
         self.momentum_encoder = base_encoder(num_classes=mlp_dim)
-        self.filter = Filter(self.num_classes,dim)
+        self.filter = Filter(self.num_classes, dim,
+                             gate_fn=partial(VisionGate,in_dim=320))
         self.norm = norm
         self.warmup = warmup
 
@@ -168,9 +170,15 @@ class MoCo(nn.Module):
 
         if self.beta>0:
             # disparate contrast
+            # disparate_loss = (
+            #     self.disparate_loss(q1,k2,y,sy) + 
+            #     self.disparate_loss(q2,k1,y,sy))/2
+            
+            sk2 = k2[shuffle_idx]
+            sk1 = k1[shuffle_idx]
             disparate_loss = (
-                self.disparate_loss(q1,k2,y,sy) + 
-                self.disparate_loss(q2,k1,y,sy))/2
+                self.disparate_vision(q1,sk2,x1,x2[shuffle_idx]) + 
+                self.disparate_vision(q2,sk1,x2,x1[shuffle_idx]))/2
             
             loss += self.beta * disparate_loss
 
@@ -183,14 +191,14 @@ class MoCo(nn.Module):
 
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
         with torch.no_grad():
-            activation, entropy = self.filter.gate.statistics()
-            self.log['activation'] = activation.item()
-            self.log['entropy'] = entropy.item()
-            self.log['ins'] = C - instance_loss.item() 
+            # activation, entropy = self.filter.gate.statistics()
+            # self.log['activation'] = activation.item()
+            # self.log['entropy'] = entropy.item()
+            self.log['ins'] = instance_loss.item() 
             if self.beta>0:
-                self.log['dis'] = C - disparate_loss.item() 
+                self.log['dis'] = disparate_loss.item() 
             if self.alpha>0:
-                self.log['cls'] = C - class_loss.item() 
+                self.log['cls'] = class_loss.item() 
             self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         
@@ -236,6 +244,20 @@ class MoCo(nn.Module):
         loss = multipos_ce_loss(logits,c2_mask,class_mask)
         return loss
     
+    
+    def disparate_vision(self, z1, k2, x1, x2):
+
+        k2 = concat_all_gather(k2)
+        fz1,fz2 = self.filter(z1, k2, x1, x2)
+        
+        scale = self.scale_logit.exp()
+        logits = scale * self.filter.contrast(fz1,fz2)
+        
+        N = logits.shape[0]  # batch size per GPU
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        labels = (torch.arange(N, dtype=torch.long) + N * rank).to(z1.device)
+        loss = nn.CrossEntropyLoss()(logits, labels)
+        return loss
 
     def class_loss(self,z1,k2,y1,y2):
         k2 = concat_all_gather(k2)
