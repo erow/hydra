@@ -25,7 +25,7 @@ __all__ = [
 
 class VisionTransformerMoCo(VisionTransformer):
     def __init__(self, stop_grad_conv1=False, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(**kwargs,dynamic_img_size=True)
         self.num_tokens = 1
         # Use fixed 2D sin-cos position embedding
         self.build_2d_sincos_position_embedding()
@@ -113,25 +113,34 @@ class ConvStem(nn.Module):
         x = self.norm(x)
         return x
 
-def vit_tiny(**kwargs):
+def vit_tiny(weights=None, **kwargs):
     model = VisionTransformerMoCo(
         patch_size=16, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model.default_cfg = _cfg()
+    if weights:
+        state = torch.load(weights)
+        print("loading, ", model.load_state_dict(state,False))
     return model
 
-def vit_small(**kwargs):
+def vit_small(weights=None, **kwargs):
     model = VisionTransformerMoCo(
         patch_size=16, embed_dim=384, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model.default_cfg = _cfg()
+    if weights:
+        state = torch.load(weights)
+        print("loading, ", model.load_state_dict(state,False))
     return model
 
-def vit_base(**kwargs):
+def vit_base(weights=None, **kwargs):
     model = VisionTransformerMoCo(
         patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     model.default_cfg = _cfg()
+    if weights:
+        state = torch.load(weights)
+        print("loading, ", model.load_state_dict(state,False))
     return model
 
 def vit_conv_small(**kwargs):

@@ -52,12 +52,15 @@ torchvision_model_names = sorted(name for name in torchvision_models.__dict__
 model_names = vits.__all__ + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='Hydra MoCo ImageNet Pre-Training')
-parser.add_argument("--output_dir", type=str, required=True)
+parser.add_argument("--output_dir", type=str, required=False)
+parser.add_argument("--debug", action='store_true', help='debug mode, only train 1 epoch',default=False)
+parser.add_argument('--weights',default=None,type=str)
 parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffcv","STL"])
 parser.add_argument("--img_size", default=224, type=int)
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument("--aug", default="default", type=str, choices=["default","simple"])
+parser.add_argument('--num_crops', default=0, type=int, help='number of local crops, 0 means no local crops, default is 0')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
                     choices=model_names,
                     help='model architecture: ' +
@@ -173,18 +176,21 @@ def main():
 
 def main_worker(gpu, ngpus_per_node, args):
     args.gpu = gpu
-    
+    if args.debug:
+        args.output_dir = None
+    else:
+        assert args.output_dir is not None, "output_dir must be set in train mode"
     if args.output_dir:
         os.makedirs(args.output_dir,exist_ok=True)
     # create model
     print("=> creating model '{}'".format(args.arch))
     if args.arch.startswith('vit'):
         model = moco.builder.MoCo_ViT(
-            partial(vits.__dict__[args.arch], stop_grad_conv1=args.stop_grad_conv1),
+            partial(vits.__dict__[args.arch], stop_grad_conv1=args.stop_grad_conv1,weights=args.weights),
             args.moco_dim, args.moco_mlp_dim, T=args.moco_t)
     else:
         model = moco.builder.MoCo_ResNet(
-            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True), 
+            partial(torchvision_models.__dict__[args.arch], zero_init_residual=True,weights=args.weights), 
             args.moco_dim, args.moco_mlp_dim, T=args.moco_t)
     
     # infer learning rate before changing batch size
@@ -262,40 +268,6 @@ def main_worker(gpu, ngpus_per_node, args):
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
-    if args.aug == 'default':
-        augmentation1 = [
-            transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
-            transforms.RandomApply([
-                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize
-        ]
-
-        augmentation2 = [
-            transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
-            transforms.RandomApply([
-                transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
-            ], p=0.8),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),
-            transforms.RandomApply([moco.loader.Solarize()], p=0.2),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize
-        ]
-    elif args.aug == 'simple':
-        augmentation1 = [
-            transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
-            transforms.ToTensor(),
-            normalize
-        ]
-        augmentation2 = augmentation1
-
     if (args.data_set =='ffcv'):
         if args.aug == 'default':
             pipelines = ffcv_transform.MultiviewPipeline(args.img_size, scale=(args.crop_min, 1.))
@@ -314,18 +286,66 @@ def main_worker(gpu, ngpus_per_node, args):
         )
         pass
     else:
+        # follow BYOL's augmentation recipe: https://arxiv.org/abs/2006.07733
+        if args.aug == 'default':
+            augmentation1 = [
+                transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
+                transforms.RandomApply([
+                    transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+                ], p=0.8),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=1.0),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize
+            ]
+
+            augmentation2 = [
+                transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
+                transforms.RandomApply([
+                    transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+                ], p=0.8),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.1),
+                transforms.RandomApply([moco.loader.Solarize()], p=0.2),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                normalize
+            ]
+            
+            local_augmentation = [
+                transforms.RandomResizedCrop(96, scale=(0.05, 0.4)),
+                transforms.RandomApply([
+                    transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
+                ], p=0.8),
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomApply([moco.loader.GaussianBlur([.1, 2.])], p=0.5),
+                transforms.ToTensor(),
+                normalize
+            ]
+        elif args.aug == 'simple':
+            augmentation1 = [
+                transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.)),
+                transforms.ToTensor(),
+                normalize
+            ]
+            augmentation2 = augmentation1
+
+        transform=moco.loader.MultiCropsTransform(transforms.Compose(augmentation1), 
+                                            transforms.Compose(augmentation2),
+                                            transforms.Compose(local_augmentation),num_crops=args.num_crops)
+        
         if (args.data_set =='STL'):
             train_dataset = datasets.STL10(
                 args.data,
                 split='train',
                 download=True,
-                transform=moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                            transforms.Compose(augmentation2)))
+                transform=transform)
+                
         else:
             train_dataset = datasets.ImageFolder(
                 traindir,
-                moco.loader.TwoCropsTransform(transforms.Compose(augmentation1), 
-                                            transforms.Compose(augmentation2)))
+                transform=transform)
 
         if args.distributed:
             train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
@@ -449,8 +469,7 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             targets = targets.cuda(args.gpu,non_blocking=True)
         else:
             images, targets = batch
-            images[0] = images[0].cuda(args.gpu, non_blocking=True)
-            images[1] = images[1].cuda(args.gpu, non_blocking=True)
+            images = [x.cuda(args.gpu, non_blocking=True) for x in images]
             targets = targets.cuda(args.gpu,non_blocking=True)
             
         # measure data loading time
@@ -466,7 +485,7 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
 
         # compute output
         with torch.cuda.amp.autocast(True):
-            loss,log = model(images[0], images[1], moco_m, targets=targets,epoch=epoch)
+            loss,log = model(images, moco_m, targets=targets,epoch=epoch)
 
         losses.update(loss.item(), images[0].size(0))
         if (args.rank == 0 or not args.multiprocessing_distributed) and summary_writer:

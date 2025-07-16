@@ -12,11 +12,36 @@ import torch.nn.functional as F
 from moco.filter import Filter, ConvFilter
 import gin
 
+@gin.configurable()
+class PairSampler():
+    def __init__(self,pair_file='res/semantic_distance.pth',max_level=11,alpha=0):
+        """
+        alpha=0: all class pairs are equally sampled
+        alpha=10: almost identical class pairs
+        """
+        pair_samples = torch.load(pair_file)
+        self.pair_samples = torch.tensor([x[0] for x in pair_samples if x[1]<max_level]) #n,2
+        self.dist =  torch.tensor([x[1] for x in pair_samples if x[1]<max_level])
+        self.weights = 1/(1+self.dist)**alpha
+        self.weights = self.weights / self.weights.sum()
+    
+    def __call__(self, num_samples):
+        sampled_indices = torch.multinomial(
+                self.weights,
+                num_samples,
+                replacement=True
+            )
+        pairs = self.pair_samples[sampled_indices]
+        dist = self.dist[sampled_indices]
+        return pairs,dist
+    
+
 @gin.configurable(denylist=['dim','mlp_dim','T'])
 class MoCo(nn.Module):
     """
     Build a MoCo model with a base encoder, a momentum encoder, and two MLPs
     https://arxiv.org/abs/1911.05722
+        self.momentum = 0.9
     """
     def __init__(self, base_encoder, 
                  dim=256, mlp_dim=4096, T=1.0, 
@@ -26,8 +51,6 @@ class MoCo(nn.Module):
                  num_layers = 3,
                  warmup = 0,
                  sep = False,
-                 learnable=True, 
-                 compile=False,
                  grad_checkpointing=False,
                  num_classes=1000):
         """
@@ -44,7 +67,7 @@ class MoCo(nn.Module):
         self.sep = sep
         self.num_classes=num_classes
         self.num_layers = num_layers 
-        self.learnable = learnable
+        
         # build encoders
         self.base_encoder = base_encoder(num_classes=mlp_dim)
         if grad_checkpointing:
@@ -63,16 +86,10 @@ class MoCo(nn.Module):
         for param_b, param_m in zip(self.base_encoder.parameters(), self.momentum_encoder.parameters()):
             param_m.data.copy_(param_b.data)  # initialize
             param_m.requires_grad = False  # not update by gradient
+            
         
-        self.register_buffer('class_vector', 
-            torch.zeros(self.num_classes, dim))
-        self.momentum = 0.9
+        self.pair_sampler = PairSampler()
         
-        if compile:
-            self.base_encoder = torch.compile(self.base_encoder)
-            self.momentum_encoder = torch.compile(self.momentum_encoder)
-            self.filter = torch.compile(self.filter)
-            self.predictor = torch.compile(self.predictor)
     
     @torch.no_grad()
     def representation(self, x):
@@ -126,21 +143,18 @@ class MoCo(nn.Module):
         labels = (torch.arange(N, dtype=torch.long) + N * rank).to(q.device)
         return nn.CrossEntropyLoss()(logits, labels)
 
-    def forward(self, x1, x2, m, targets,epoch):
+    def forward(self, images, m, targets,epoch):
         """
         Input:
-            x1: first views of images
-            x2: second views of images
+            images: the list of image views
             m: moco momentum
         Output:
             loss
         """
+        x1, x2 = images[0], images[1]
 
         self.log = {}
-        # shuffle trick, compose a positive pair from a random sample of the batch
-        shuffle_idx = torch.randperm(len(x1)).to(x1.device)
-        y = targets.clone()
-        sy = targets[shuffle_idx].contiguous()
+        
         
         # compute features
         xs = torch.cat([x1, x2], dim=0)
@@ -149,18 +163,43 @@ class MoCo(nn.Module):
         q2 = self.predictor(z2)
         with torch.no_grad():  # no gradient
             self._update_momentum_encoder(m)  # update the momentum encoder
-
             # compute momentum features as targets
             k1,k2 = self.momentum_encoder(xs).chunk(2)            
 
         instance_loss =  (self.contrastive_loss(q1, k2) + self.contrastive_loss(q2, k1))/2
         loss  =  instance_loss
+        
+        # for local crops
+        if len(images) > 2:
+            local_loss = 0
+            for i in range(2, len(images)):
+                x = images[i]
+                z = self.base_encoder(x)
+                q = self.predictor(z)
+                local_loss += (self.contrastive_loss(q, k1) + 
+                               self.contrastive_loss(q, k2))/2
+            loss += local_loss/ (len(images) - 2)
+        
 
-        # during warmup, only train the filter
-        if epoch < self.warmup:
-            q1 = q1.detach()
-            q2 = q2.detach()
-
+        ######### for disparate contrastive learning #########
+        y1=[]
+        y2=[]
+        l=0
+        bs = len(q1)
+        while True:
+            pairs, _ = self.pair_sampler(bs*2)
+            y1_,y2_ = pairs.cuda().unbind(1)
+            ## remove the samples not in the random pairs
+            mask = (targets.unsqueeze(1) == y1_.unsqueeze(0)).any(0)
+            mask &= (targets.unsqueeze(1) == y2_.unsqueeze(0)).any(0)
+            y1.append(y1_[mask])
+            y2.append(y2_[mask])
+            l+=len(y1[-1])
+            if l > bs:
+                y1 = torch.cat(y1)[:bs]
+                y2 = torch.cat(y2)[:bs]
+                break
+        
         if self.sep:
             # separated predictor
             q1 = self.predictor_dis(z1)
@@ -169,17 +208,12 @@ class MoCo(nn.Module):
         if self.beta>0:
             # disparate contrast
             disparate_loss = (
-                self.disparate_loss(q1,k2,y,sy) + 
-                self.disparate_loss(q2,k1,y,sy))/2
+                self.disparate_loss(q1,k2,y1,y2) + 
+                self.disparate_loss(q2,k1,y1,y2))/2
             
             loss += self.beta * disparate_loss
 
-        if self.alpha>0:
-            class_loss = (self.disparate_loss(q1,k2,y,y) + 
-                        self.disparate_loss(q2,k1,y,y))/2
-            loss += self.alpha * class_loss
-
-        loss /= (1 + self.alpha + self.beta)
+        loss /= (1 + self.beta)
 
         C = np.log(len(k1)*( torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1))
         with torch.no_grad():
@@ -189,8 +223,6 @@ class MoCo(nn.Module):
             self.log['ins'] = C - instance_loss.item() 
             if self.beta>0:
                 self.log['dis'] = C - disparate_loss.item() 
-            if self.alpha>0:
-                self.log['cls'] = C - class_loss.item() 
             self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         
@@ -200,28 +232,6 @@ class MoCo(nn.Module):
         return loss, self.log
     
     def disparate_loss(self, z1, k2, y1, posy):
-        if not self.learnable:
-            # update the class representation
-            self.class_vector.data = self.momentum * self.class_vector + (1-self.momentum) * mean_representation(k2, y1, self.num_classes)
-            # select the dimensions with positive contribution
-            cls_sim = torch.einsum('id,jd->ijd', self.class_vector, self.class_vector)
-            # optimize a random class pair
-            while True:
-                i,j = torch.randint(0, self.num_classes, (2,))
-                if (y1 == i).sum() > 0 and (y1 == j).sum() > 0:
-                    break
-            gates = (cls_sim[i,j] > 0.05).float() 
-
-            bp1 = z1[y1 == i]
-            bp2 = z1[y1 == j]
-            bz1 = k2[y1 == i]
-            bz2 = k2[y1 == j]
-
-            sim_z = ( cross_cosine_similarity(bp1*gates,bz2.detach()*gates)+
-                    cross_cosine_similarity(bp2*gates,bz1.detach()*gates))/2
-            self.log['activation'] = gates.sum().item()
-            return 1 - sim_z
-
         k2 = concat_all_gather(k2)
         fz1,fz2 = self.filter(z1, k2, y1,posy)
         

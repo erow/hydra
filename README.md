@@ -1,28 +1,19 @@
-## Hydra-MoCo for Universal Contrastive Leraning with ResNet and ViT
+## Hydra-MoCo for Arbitrary Contrastive Leraning with ResNet and ViT
 
 ### Introduction
-This is a PyTorch implementation of [Hydra-MoCo](https://arxiv.org/abs/2410.18200) for Universal Contrastive Leraning with ResNet and ViT.
+This is a PyTorch implementation of [Hydra-MoCo](https://arxiv.org/abs/2410.18200) for Arbitrary Contrastive Leraning with ResNet and ViT.
 
 This repository is based on the [MoCo v3](https://arxiv.org/abs/2104.02057) and [codes](https://github.com/facebookresearch/moco-v3).
 ### Main Results
 
 The following results are based on ImageNet-1k self-supervised pre-training, followed by ImageNet-1k supervised training for linear evaluation or end-to-end fine-tuning. All results in these tables are based on a batch size of 4096.
 
-**Pre-trained models** and **configs** can be found at [CONFIG.md](CONFIG.md).
+**Pre-trained models** and **configs** can be found at [CONFIG.md](CONFIG.md). 
 
-#### ResNet-50, linear classification
-
-todo:
-
-#### ViT, linear classification
-
-todo:
-
-#### ViT, end-to-end fine-tuning
-
-todo:
-
-The end-to-end fine-tuning results are obtained using the [DeiT](https://github.com/facebookresearch/deit) repo, using all the default DeiT configs. ViT-B is fine-tuned for 150 epochs (vs DeiT-B's 300ep, which has 81.8% accuracy).
+| ft.        | IN1K | note | ckpt |
+|------------|------|------|------|
+| mocov3     |      |      |      |
+| hydra_moco | [84.02](https://wandb.ai/dlib/hydra/runs/7drtyzly/overview)|Trained 200 epochs from MAE-pretrained weights |      |
 
 ### Usage: Preparation
 
@@ -62,16 +53,56 @@ torchrun --nproc_per_node=8 --nnodes=1  --node-rank=${rank} main_moco.py \
 
 With a batch size of 4096, ViT-Base is trained with 8 nodes:
 ```
-torchrun --nproc_per_node=8 --nnodes=2  --node-rank=${rank} main_moco.py \
-  -a vit_base \
+torchrun --nproc_per_node=8 --nnodes=2  --node-rank=${rank} \
+  main_moco.py -a vit_base \
   --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
   --epochs=300 --warmup-epochs=40 \
   --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
-  --dist-url 'tcp://[your first node address]:[specified port]' \
-  --multiprocessing-distributed --world-size 8 --rank 0 \
+  --gin MoCo.beta=1 MoCo.sep=True \
   [your imagenet-folder with train and val folders]
 ```
 On other nodes, run the same command with `--rank 1`, ..., `--rank 7` respectively.
+
+
+#### selective class pairs
+We set a sampling weight for each pair $\frac{1}{(1+d)^{\alpha}}$, where $d$ denotes the distance of the pair in the semantic hierarchy (WordNet), and $\alpha$ is a hyperparameter to adjust the weight.  
+
+
+Each class pair has the same sampling weight and will be equally sampled
+```
+torchrun --nproc_per_node=8 \
+  main_moco.py -a vit_base -b 2048\
+  --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
+  --epochs=300 --warmup-epochs=40 \
+  --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
+  --gin MoCo.beta=1 MoCo.sep=True PairSampler.alpha=0 \
+  --output_dir outputs/positive/a0 \ 
+  [your imagenet-folder with train and val folders]
+```
+
+The semantic distance between samples in a pair must be smaller than 1, that is, only identical class pairs are sampled:
+```
+torchrun --nproc_per_node=8 \
+  main_moco.py -a vit_base -b 2048\
+  --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
+  --epochs=300 --warmup-epochs=40 \
+  --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
+  --gin MoCo.beta=1 MoCo.sep=True PairSampler.max_level=1 PairSampler.alpha=0 \
+  --output_dir outputs/positive/a10 \ 
+  [your imagenet-folder with train and val folders]
+```
+
+The close pairs has a higher chance to be sampled:
+```
+torchrun --nproc_per_node=8 \
+  main_moco.py -a vit_base -b 2048\
+  --optimizer=adamw --lr=1.5e-4 --weight-decay=.1 \
+  --epochs=300 --warmup-epochs=40 \
+  --stop-grad-conv1 --moco-m-cos --moco-t=.2 \
+  --gin MoCo.beta=1 MoCo.sep=True PairSampler.max_level=11 PairSampler.alpha=2 \
+  --output_dir outputs/positive/a2 \ 
+  [your imagenet-folder with train and val folders]
+```
 
 #### Notes:
 1. The batch size specified by `-b` is the total batch size across all GPUs.

@@ -10,17 +10,23 @@ import random
 import torchvision.transforms.functional as tf
 
 
-class TwoCropsTransform:
+class MultiCropsTransform:
     """Take two random crops of one image"""
 
-    def __init__(self, base_transform1, base_transform2):
+    def __init__(self, base_transform1, base_transform2,local_transform=None, num_crops=8, ):
         self.base_transform1 = base_transform1
         self.base_transform2 = base_transform2
+        self.local_transform = local_transform
+        self.num_crops = num_crops
 
     def __call__(self, x):
         im1 = self.base_transform1(x)
         im2 = self.base_transform2(x)
-        return [im1, im2]
+        local_crops = []
+        for _ in range(self.num_crops):
+            local_crops.append(self.local_transform(x))
+            
+        return [im1, im2] + local_crops
 
 
 class GaussianBlur(object):
