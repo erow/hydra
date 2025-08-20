@@ -182,23 +182,30 @@ class MoCo(nn.Module):
         
 
         ######### for disparate contrastive learning #########
-        y1=[]
-        y2=[]
-        l=0
-        bs = len(q1)
-        while True:
-            pairs, _ = self.pair_sampler(bs*2)
-            y1_,y2_ = pairs.cuda().unbind(1)
-            ## remove the samples not in the random pairs
-            mask = (targets.unsqueeze(1) == y1_.unsqueeze(0)).any(0)
-            mask &= (targets.unsqueeze(1) == y2_.unsqueeze(0)).any(0)
-            y1.append(y1_[mask])
-            y2.append(y2_[mask])
-            l+=len(y1[-1])
-            if l > bs:
-                y1 = torch.cat(y1)[:bs]
-                y2 = torch.cat(y2)[:bs]
-                break
+
+        # pair generation
+        # y1=[]
+        # y2=[]
+        # l=0
+        # bs = len(q1)
+        # while True:
+        #     pairs, _ = self.pair_sampler(bs*2)
+        #     y1_,y2_ = pairs.cuda().unbind(1)
+        #     ## remove the samples not in the random pairs
+        #     mask = (targets.unsqueeze(1) == y1_.unsqueeze(0)).any(0)
+        #     mask &= (targets.unsqueeze(1) == y2_.unsqueeze(0)).any(0)
+        #     y1.append(y1_[mask])
+        #     y2.append(y2_[mask])
+        #     l+=len(y1[-1])
+        #     if l > bs:
+        #         y1 = torch.cat(y1)[:bs]
+        #         y2 = torch.cat(y2)[:bs]
+        #         break
+        
+        #: random pair
+        y1 = targets
+        y2 = targets[torch.randperm(len(targets),device=targets.device)]
+
         
         if self.sep:
             # separated predictor

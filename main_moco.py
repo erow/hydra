@@ -38,18 +38,11 @@ import moco.builder
 import moco.loader
 import moco.optimizer
 import datetime 
-
+import timm
 import vits
 
 from multiloader import MultiLoader
 import ffcv_transform
-
-
-torchvision_model_names = sorted(name for name in torchvision_models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(torchvision_models.__dict__[name]))
-
-model_names = vits.__all__ + torchvision_model_names
 
 parser = argparse.ArgumentParser(description='Hydra MoCo ImageNet Pre-Training')
 parser.add_argument("--output_dir", type=str, required=False)
@@ -57,15 +50,13 @@ parser.add_argument("--debug", action='store_true', help='debug mode, only train
 parser.add_argument('--weights',default=None,type=str)
 parser.add_argument("--data_set", default="IN1K", type=str, choices=["IN1K","ffcv","STL"])
 parser.add_argument("--img_size", default=224, type=int)
+parser.add_argument('--local_size',default=96,type=int)
 parser.add_argument('data', metavar='DIR',
                     help='path to dataset')
 parser.add_argument("--aug", default="default", type=str, choices=["default","simple"])
 parser.add_argument('--num_crops', default=0, type=int, help='number of local crops, 0 means no local crops, default is 0')
 parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet50',
-                    choices=model_names,
-                    help='model architecture: ' +
-                        ' | '.join(model_names) +
-                        ' (default: resnet50)')
+                    help='model architecture: ' )
 parser.add_argument('-j', '--workers', default=10, type=int, metavar='N',
                     help='number of data loading workers (default: 10)')
 parser.add_argument('--epochs', default=100, type=int, metavar='N',
@@ -184,7 +175,14 @@ def main_worker(gpu, ngpus_per_node, args):
         os.makedirs(args.output_dir,exist_ok=True)
     # create model
     print("=> creating model '{}'".format(args.arch))
-    if args.arch.startswith('vit'):
+    if args.arch.startswith('timm'):
+        arch = args.arch.replace('timm:','')
+        def base_encoder(**kwargs):
+            encoder = timm.create_model(arch,pretrained=True,**kwargs,dynamic_img_size=True)
+            return encoder
+        model = moco.builder.MoCo_ViT(base_encoder,
+            args.moco_dim, args.moco_mlp_dim, T=args.moco_t)
+    elif args.arch.startswith('vit'):
         model = moco.builder.MoCo_ViT(
             partial(vits.__dict__[args.arch], stop_grad_conv1=args.stop_grad_conv1,weights=args.weights),
             args.moco_dim, args.moco_mlp_dim, T=args.moco_t)
@@ -270,7 +268,8 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if (args.data_set =='ffcv'):
         if args.aug == 'default':
-            pipelines = ffcv_transform.MultiviewPipeline(args.img_size, scale=(args.crop_min, 1.))
+            pipelines = ffcv_transform.MultiviewPipeline(args.img_size, scale=(args.crop_min, 1.),
+                local_crops_number=args.num_crops, local_img_size=args.local_size)
         else:
             pipelines = ffcv_transform.SimpleMultiviewPipeline(args.img_size, scale=(args.crop_min, 1.))
         train_loader = MultiLoader(
@@ -314,7 +313,7 @@ def main_worker(gpu, ngpus_per_node, args):
             ]
             
             local_augmentation = [
-                transforms.RandomResizedCrop(96, scale=(0.05, 0.4)),
+                transforms.RandomResizedCrop(args.local_size, scale=(0.05, 0.4)),
                 transforms.RandomApply([
                     transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)  # not strengthened
                 ], p=0.8),
