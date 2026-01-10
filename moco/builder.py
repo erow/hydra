@@ -230,7 +230,6 @@ class MoCo(nn.Module):
             self.log['ins'] = C - instance_loss.item() 
             if self.beta>0:
                 self.log['dis'] = C - disparate_loss.item() 
-            self.log['scale'] = self.scale_logit.exp().item()
             self.log['z@sim'] = nn.functional.cosine_similarity(z1,z2).mean().item()
         
         if self.gamma>0:
@@ -242,7 +241,7 @@ class MoCo(nn.Module):
         k2 = concat_all_gather(k2)
         fz1,fz2 = self.filter(z1, k2, y1,posy)
         
-        scale = self.scale_logit.exp()
+        scale = 1/self.T
         logits = scale * self.filter.contrast(fz1,fz2)
         
         
