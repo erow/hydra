@@ -16,7 +16,8 @@ from timm.models.layers import PatchEmbed
 
 __all__ = [
     'vit_tiny',
-    'vit_small', 
+    'vit_tiny_h12',
+    'vit_small',
     'vit_base',
     'vit_conv_small',
     'vit_conv_base',
@@ -121,6 +122,23 @@ def vit_tiny(weights=None, **kwargs):
     if weights:
         state = torch.load(weights)
         print("loading, ", model.load_state_dict(state,False))
+    return model
+
+
+def vit_tiny_h12(weights=None, **kwargs):
+    """MAE-Lite ViT-Tiny: same width/depth as vit_tiny, but num_heads=12 (not 3).
+
+    Weight tensor shapes match ``vit_tiny`` (QKV is a single Linear), but attention
+    head_dim differs (16 vs 64). Checkpoints trained with MAE-Lite must use this
+    factory for faithful inference.
+    """
+    model = VisionTransformerMoCo(
+        patch_size=16, embed_dim=192, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+    model.default_cfg = _cfg()
+    if weights:
+        state = torch.load(weights)
+        print("loading, ", model.load_state_dict(state, False))
     return model
 
 def vit_small(weights=None, **kwargs):

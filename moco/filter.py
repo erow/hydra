@@ -157,6 +157,18 @@ class Filter(nn.Module):
         logits =  torch.einsum("bj,bnj->bn",x1,x2)
         return logits
 
+    def gated_contrast(self, x1, x2, y1, y2=None, *, backend: str = "auto"):
+        """Gate → normalize → contrast in one shot (optionally Triton-fused).
+
+        Equivalent to ``contrast(*forward(x1, x2, y1, y2))`` but avoids
+        materializing the ``[B, N, K]`` gated-key tensor when ``backend`` is
+        ``"auto"`` / ``"triton"`` / ``"torch"``.
+        """
+        from moco.fused_gated_contrast import fused_gated_contrast
+
+        gate = self.gate(y1, y2)
+        return fused_gated_contrast(x1, x2, gate, backend=backend)
+
 from timm.models.convnext  import convnextv2_atto
 class VisionGate(nn.Module):
     def __init__(self, embed_dim, in_dim=512, mlp_dim=1024,

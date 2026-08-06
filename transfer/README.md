@@ -82,6 +82,16 @@ Flowers [\[Homepage\]](https://www.robots.ox.ac.uk/~vgg/data/flowers/102/)
     └── ./data/flowers/imagelabels.mat    # labels   
 ```
 
+Mini-ImageNet (frozen few-shot; 100-class ImageFolder, not episodic 5-way)
+```
+./data/
+└── ./data/mini_imagenet/
+    ├── ./data/mini_imagenet/train/<class_id>/*.jpg
+    └── ./data/mini_imagenet/test/<class_id>/*.jpg
+```
+Default protocol shots: `1 5 10 25`. Prepare splits before evaluation; the
+evaluator does not auto-download Mini-ImageNet.
+
 
 CIFAR-10/CIFAR-100 datasets will be downloaded automatically.
 

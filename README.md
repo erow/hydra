@@ -1,3 +1,210 @@
+# Backbone extraction
+
+`extract_backbone.py` extracts the feature extractor from every checkpoint in
+`../weights/`. It runs on CPU and writes a plain PyTorch state dictionary; it
+removes ImageNet classifiers, MoCo projectors, Hydra filters, and predictors.
+
+## Backbone structures
+
+| Checkpoint | Backbone | Removed keys |
+| --- | --- | --- |
+| `HydraV1_e1000_IN1K_resnet.pth` | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | `fc.*` |
+| `HydraV2_e1000_IN1K_resnet.pth` | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | none |
+| `Hydra_moco_e300_IN1K_resnet.pth` | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | `fc.*` projector |
+| `HydraV1_resnet.pth`, `rebuttal_dp1.ckpt` | ResNet-50 under `visual.` | `visual.fc.*`, non-visual modules |
+| `Hydra_e100_IN1K_vitt.pth` | ViT-tiny: patch embedding, 12 blocks, `norm` | `head.*` |
+| `Hydra_e300_IN1K_vits.pth` | ViT-small: patch embedding, 12 blocks, `norm` | `head.*` |
+| `Hydra_e300_IN1K_vitb.pth` | ViT-base under `visual.` | `visual.head.*`; drop `projector`/`filter`/`logit_scale` |
+| `hydra-moco_bs4k_mae.pth` | ViT-base: patch embedding, 12 blocks, `norm` | `module.base_encoder.head.*` |
+
+Output keys are normalized to model-local names. For example,
+`module.base_encoder.blocks.0.attn.qkv.weight` becomes
+`blocks.0.attn.qkv.weight`, while `visual.layer1.0.conv1.weight` becomes
+`layer1.0.conv1.weight`.
+
+## Extract one checkpoint
+
+Run from the repository root (`src/`):
+
+```bash
+python extract_backbone.py \
+  ../weights/Hydra_e300_IN1K_vits.pth \
+  --output ../results/backbones/Hydra_e300_IN1K_vits_backbone.pth
+```
+
+Without `--output`, the default is
+`results/backbones/<checkpoint-name>_backbone.pth` relative to the current
+directory.
+
+## Extract all checkpoints
+
+```bash
+for checkpoint in ../weights/*.pth ../weights/*.ckpt; do
+  [ -f "$checkpoint" ] || continue
+  python extract_backbone.py "$checkpoint"
+done
+```
+
+Load an extracted state dictionary into the matching backbone:
+
+```python
+import torch
+
+backbone = torch.load(
+    "../results/backbones/Hydra_e300_IN1K_vits_backbone.pth",
+    map_location="cpu",
+)
+model.load_state_dict(backbone, strict=True)
+```
+
+Use ResNet-50 for the ResNet files, `vit_tiny` for `Hydra_e100_IN1K_vitt.pth`,
+`vit_small` for `Hydra_e300_IN1K_vits.pth`, and `vit_base` for
+`Hydra_e300_IN1K_vitb.pth` / `hydra-moco_bs4k_mae.pth`.
+
+## SSL representation-comparison model inventory
+
+[`model_manifest.json`](model_manifest.json) is the versioned, declarative
+inventory for the frozen-representation comparison. It records each expected
+local Hydra checkpoint, the compatible `erow/SSL` Hugging Face comparators,
+the pinned Hugging Face revision and LFS hash, architecture, parameter budget,
+pretraining metadata, preprocessing, checkpoint layout, and current loading
+status. It is metadata only: it never downloads checkpoint weights.
+
+The manifest pins `erow/SSL` to revision
+`72d63866af2338351ac142c457c64f73eb1e2490`. A later Hub revision must not be
+used without updating both the revision and file hash in the manifest.
+
+### Comparison eligibility
+
+Models may be compared only when all of the following hold:
+
+- their `architecture_id` is identical (ResNet-50, ViT-Small/16, and ViT-Base/16
+  remain separate groups);
+- both have ImageNet-1k pretraining and 224-pixel inputs;
+- both pretraining durations are known and the comparator-to-Hydra epoch ratio
+  lies in `[0.75, 1.3333333333]`; and
+- both checkpoints have a verified loader before producing metrics.
+
+The approved groups are listed in `approved_comparison_groups`. This currently
+allows ResNet-50 1000-epoch comparisons, the explicitly bounded
+ResNet-50 300-to-400-epoch comparison, and the ViT-Small 300-epoch comparison.
+Unknown budgets, a missing matching architecture, and unverified checkpoint
+layouts are explicit exclusions rather than permissive fallbacks.
+
+### Local checkpoint availability
+
+At inventory time `weights/` contains no Hydra checkpoint payloads, so every
+local model has `availability: "not_present_locally"` and
+`load_status: "unvalidated"`. Supply the intended checkpoint at the recorded
+path, calculate its SHA-256, and replace the null `sha256` before evaluation.
+Remote comparator layouts are likewise unvalidated because their weights were
+not downloaded. Do not interpret a model being in an approved group as proof
+that it can be loaded; successful strict backbone loading is a prerequisite for
+the later evaluation task.
+
+## Frozen-feature evaluation
+
+`evaluate_frozen.py` is the reusable, declarative evaluation entry point. It
+reads `model_manifest.json`, loads one manifest checkpoint, freezes the
+backbone, caches normalized 224-pixel embeddings, and fits a closed-form
+regularized linear probe. Checkpoint loading is strict for all non-head
+parameters; missing local files, unavailable optional datasets, and unverified
+checkpoint layouts fail with an actionable error.
+
+After installing `requirements.txt`, a transfer run is:
+
+```bash
+python evaluate_frozen.py \
+  --model hydra-v1-rn50-e1000 --dataset cifar10 \
+  --data-root /path/to/datasets \
+  --cache-dir ../results/ssl-representation-comparison/embeddings \
+  --output ../results/ssl-representation-comparison/cifar10.json
+```
+
+The default protocol evaluates 1, 5, 10, and 25 examples per class with seeds
+0, 1, and 2. Override `--shots`, `--seeds`, or `--regularization` for smoke
+runs. CIFAR datasets must already be present (the evaluator never downloads
+them); Oxford Pets and Flowers must use the layouts documented in
+`transfer/README.md`. Remote `erow/SSL` files require the optional
+`huggingface_hub` package and `--download`; the manifest revision remains
+pinned.
+
+ImageNet-C uses the same frozen representation and a clean ImageNet linear
+probe:
+
+```bash
+python evaluate_frozen.py --task imagenet-c \
+  --model hydra-v1-rn50-e1000 \
+  --imagenet-root /path/to/imagenet \
+  --imagenet-c-root /path/to/imagenet-c
+```
+
+`--imagenet-root` must contain `train/` and `val/`; ImageNet-C must contain
+the 15 corruption directories, each with severity directories `1` through
+`5` in ImageFolder layout. The output reports clean accuracy, mean corruption
+accuracy, relative corruption error, and per-corruption accuracy. This command
+does not submit jobs or aggregate reports.
+
+## Slurm launchers and result validation
+
+Remote jobs go through the unified entry `cluster/submit.sh`, which loads
+`cluster/isambard.env` (or `cluster/eureka.env`) and runs
+`cluster/isambard.sbatch`. Paths are pinned in the env files:
+
+- project: `/lus/lfs1aip2/projects/u6gd/jiantao/SimLAP`
+- environment: `/lus/lfs1aip2/projects/u6gd/jiantao/FastSSL/.venv`
+- transfer datasets: `DATA_ROOT` (defaults to `/lus/lfs1aip2/projects/u6gd/datasets`)
+- licensed ImageNet-1K: `/lus/lfs1aip2/projects/u6gd/datasets/IN1K` (`train/` and class-organized `val/` required)
+- public ImageNet-C: `/lus/lfs1aip2/projects/u6gd/datasets/IN1K-C` (15 corruptions × severities `1`–`5`)
+- outputs: `/scratch/u6gd/jw02425.u6gd/SimLAP/ssl-representation-comparison/outputs`
+
+Override `IMAGENET_ROOT` / `IMAGENET_C_ROOT` via the environment if needed.
+Verify the ImageNet-1K validation split is class-organized before submitting an
+ImageNet-C job. Keep ImageNet-C provenance and archives beside the shared
+dataset, not in source or scratch outputs.
+
+Generic one-off job (Isambard):
+
+```bash
+/lus/lfs1aip2/projects/u6gd/jiantao/SimLAP/cluster/submit.sh --job-name=ssl-smoke -- \
+  bash /lus/lfs1aip2/projects/u6gd/jiantao/SimLAP/cluster/jobs/evaluate_ssl.sh
+```
+
+After placing datasets and checkpoints, submit a one-model smoke test
+(one shot, seed 0):
+
+```bash
+/lus/lfs1aip2/projects/u6gd/jiantao/SimLAP/cluster/submit_ssl_comparison.sh smoke
+```
+
+Submit the architecture-matched transfer and ImageNet-C matrix with three
+fixed seeds using:
+
+```bash
+/lus/lfs1aip2/projects/u6gd/jiantao/SimLAP/cluster/submit_ssl_comparison.sh final
+```
+
+Each batch job writes metrics and embeddings below the output root, then runs
+`validate_results.py`. Validation requires schema version `1.0.0`, matching
+manifest identity and checkpoint metadata, complete shot/seed coverage, and
+the full 15-corruption/5-severity ImageNet-C protocol. Invalid records fail
+the batch job and must not be passed to a later aggregator. The launchers do
+not generate reports. Aggregate validated records after jobs finish:
+
+```bash
+python aggregate_report.py \
+  --manifest model_manifest.json \
+  --results-dir /scratch/u6gd/jw02425.u6gd/SimLAP/ssl-representation-comparison/outputs/metrics \
+  --output-dir /scratch/u6gd/jw02425.u6gd/SimLAP/ssl-representation-comparison/outputs/report
+```
+
+This writes `summary.json`, `summary.csv`, and `report.md` under the supplied
+output directory. ResNet and ViT groups remain separate. Missing or
+non-default shot/seed evaluations are marked `incomplete`; their metrics stay
+absent rather than being inferred. For a local smoke check, pass individual
+JSON paths instead of `--results-dir` and write to a temporary or `results/`
+directory so generated files stay out of the source tree.
+
 ## Hydra-MoCo for Arbitrary Contrastive Leraning with ResNet and ViT
 
 ### Introduction

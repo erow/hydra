@@ -239,12 +239,10 @@ class MoCo(nn.Module):
     
     def disparate_loss(self, z1, k2, y1, posy):
         k2 = concat_all_gather(k2)
-        fz1,fz2 = self.filter(z1, k2, y1,posy)
-        
         scale = 1/self.T
-        logits = scale * self.filter.contrast(fz1,fz2)
-        
-        
+        # Filter.gated_contrast → moco.fused_gated_contrast (Triton/torch fused path)
+        logits = scale * self.filter.gated_contrast(z1, k2, y1, posy)
+
         c1_mask = (y1.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y1
         c2_mask = (posy.unsqueeze(1) == concat_all_gather(y1).unsqueeze(0)) # exclude samples from y2
         class_mask = c1_mask|c2_mask
@@ -255,11 +253,8 @@ class MoCo(nn.Module):
 
     def class_loss(self,z1,k2,y1,y2):
         k2 = concat_all_gather(k2)
-
-        fz1,fz2 = self.filter(z1, k2, y1)
-
         scale = 1/self.T
-        logits = scale * self.filter.contrast(fz1,fz2)
+        logits = scale * self.filter.gated_contrast(z1, k2, y1)
 
         pos_mask = (y1.unsqueeze(1) == concat_all_gather(y2).unsqueeze(0)) # exclude the key from class y1
         loss = multipos_ce_loss(logits,pos_mask,pos_mask)
