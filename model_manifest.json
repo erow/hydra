@@ -1,0 +1,664 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_id": "ssl-representation-comparison",
+  "generated_at": "2026-07-28",
+  "scope": "Inventory only. This manifest never downloads weights and is not a checkpoint loader configuration.",
+  "sources": {
+    "local_weights_directory": "../weights",
+    "hydra_architecture_source": "README.md and extract_backbone.py",
+    "huggingface": {
+      "repository": "erow/SSL",
+      "revision": "72d63866af2338351ac142c457c64f73eb1e2490",
+      "repository_url": "https://huggingface.co/erow/SSL",
+      "metadata_retrieved_at": "2026-07-24"
+    },
+    "huggingface_hydra": {
+      "repository": "erow/Hydra",
+      "revision": "ae202d410bcd94e1574894b3342e41fff7b6c1ea",
+      "repository_url": "https://huggingface.co/erow/Hydra",
+      "metadata_retrieved_at": "2026-07-28",
+      "notes": "ViT files: Hydra_e100_IN1K_vitt.pth, Hydra_e300_IN1K_vits.pth, Hydra_e300_IN1K_vitb.pth. No hydra-moco_bs4k_mae.pth on this repo."
+    },
+    "huggingface_simclr_bs4096": {
+      "repository": "erow/rn50_simclr_bs4096_e1000",
+      "repository_url": "https://huggingface.co/erow/rn50_simclr_bs4096_e1000",
+      "notes": "FastSSL SimCLR RN50 bs4096; latest checkpoint.pth is epoch 965/1000. Local twin: paper-p4-baselines scratch."
+    },
+    "huggingface_supcon_bs4096": {
+      "repository": "erow/rn50_supcon_bs4096_e1000",
+      "repository_url": "https://huggingface.co/erow/rn50_supcon_bs4096_e1000",
+      "notes": "FastSSL SupCon via SimLAP identical+OpenGate; latest checkpoint.pth is epoch 840/1000. Local twin: paper-p4-baselines scratch."
+    }
+  },
+  "matching_rules": {
+    "group_by": ["architecture_id"],
+    "required_equal_fields": {
+      "pretraining_dataset": "ImageNet-1k",
+      "input_size": 224
+    },
+    "pretraining_budget": {
+      "unit": "epochs",
+      "comparison": "both known and comparator_epochs / hydra_epochs in [0.75, 1.3333333333]",
+      "unknown_budget_policy": "exclude"
+    },
+    "required_load_status": "unvalidated",
+    "prohibitions": [
+      "Do not pair different architecture_id values.",
+      "Do not compare ResNet and ViT results in a single aggregate.",
+      "Do not substitute a different checkpoint revision or file hash."
+    ]
+  },
+  "preprocessing": {
+    "name": "imagenet_eval_224",
+    "resize_shorter_side": 256,
+    "center_crop": 224,
+    "mean": [0.485, 0.456, 0.406],
+    "std": [0.229, 0.224, 0.225]
+  },
+  "models": [
+    {
+      "id": "simlap-v1-rn50-e1000",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/SimLAP_v1_e1000_IN1K_resnet.pth",
+        "revision": null,
+        "sha256": null,
+        "layout": "raw state_dict; remove fc.*",
+        "availability": "present",
+        "former_names": ["HydraV1_e1000_IN1K_resnet.pth", "hydra-v1-rn50-e1000"]
+      },
+      "method": "SimLAP v1",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 1000,
+      "batch_size": 1024,
+      "momentum_encoder": false,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "No momentum encoder (SimLAP, not SimLAP†). Formerly published as HydraV1_e1000_IN1K_resnet.pth / hydra-v1-rn50-e1000. Paper tab:recipe batch size 1024."
+    },
+    {
+      "id": "simlap-v2-rn50-e1000",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/SimLAP_v2_e1000_IN1K_resnet.pth",
+        "revision": null,
+        "sha256": null,
+        "layout": "raw state_dict; no classifier keys reported",
+        "availability": "present",
+        "former_names": ["HydraV2_e1000_IN1K_resnet.pth", "hydra-v2-rn50-e1000"]
+      },
+      "method": "SimLAP v2",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 1000,
+      "batch_size": 1024,
+      "momentum_encoder": false,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "No momentum encoder (SimLAP, not SimLAP†). Formerly HydraV2_e1000_IN1K_resnet.pth / hydra-v2-rn50-e1000. Paper tab:recipe batch size 1024."
+    },
+    {
+      "id": "hydra-moco-rn50-e300",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/Hydra_moco_e300_IN1K_resnet.pth",
+        "revision": null,
+        "sha256": null,
+        "layout": "raw state_dict; remove fc.* projector",
+        "availability": "not_present_locally"
+      },
+      "method": "Hydra-MoCo",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 300,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "hydra-moco-vitt-e100",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/Hydra_e100_IN1K_vitt.pth",
+        "repository": "erow/Hydra",
+        "revision": "ae202d410bcd94e1574894b3342e41fff7b6c1ea",
+        "sha256": "41a5c1bbb0ea0d8372f1319d7f017e659f9e3b3f7ce25756d9ace9898ec55e8d",
+        "lfs_sha256": "41a5c1bbb0ea0d8372f1319d7f017e659f9e3b3f7ce25756d9ace9898ec55e8d",
+        "size_bytes": 23725806,
+        "layout": "raw state_dict; remove head.*",
+        "availability": "present"
+      },
+      "method": "Hydra-MoCo",
+      "architecture_id": "vit_tiny_patch16_224",
+      "parameter_count_millions": 5.7,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 100,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Evaluated for ViT-Tiny coverage; no fair erow/SSL ViT-Tiny comparator exists, so no approved comparison group."
+    },
+    {
+      "id": "hydra-moco-vitt-beta1-e300",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/Hydra_beta1_e300_IN1K_vitt.pth.tar",
+        "repository": null,
+        "revision": null,
+        "sha256": "9fce23fb61489c21807aec2fee054a96127eeaab767c9b66f8d8762fc540132b",
+        "size_bytes": 426357831,
+        "layout": "checkpoint state_dict; module.base_encoder.*; remove head.*",
+        "availability": "present",
+        "source_experiment": "hydra_vitt_beta1_e300",
+        "source_file": "checkpoint_0299.pth.tar"
+      },
+      "method": "Hydra-MoCo",
+      "architecture_id": "vit_tiny_patch16_224",
+      "parameter_count_millions": 5.7,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 300,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Isambard Hydra-MoCo ViT-Tiny 300e (beta1). Local experiment hydra_vitt_beta1_e300; not an approved fair group vs hydra-moco-vitt-e100 (100e)."
+    },
+    {
+      "id": "mae-lite-mocov3-vitt-e400",
+      "source": "local",
+      "role": "comparator",
+      "vit_factory": "vit_tiny_h12",
+      "checkpoint": {
+        "path": "../weights/mocov3_tiny_400e.pth.tar",
+        "repository": "wangsr126/mae-lite",
+        "revision": null,
+        "sha256": "ba2f7c6cff0488522810ab255e94d88f34094d02f8eef9df99652c54120914bd",
+        "size_bytes": 411826101,
+        "layout": "checkpoint['model']; module.base_encoder.*; remove head.*",
+        "availability": "present",
+        "download_url": "https://drive.google.com/file/d/1RI0mU-PweAVIXs_hNOx-Xw3VRhN7w6un/view"
+      },
+      "method": "MoCo v3 (MAE-Lite)",
+      "architecture_id": "vit_tiny_patch16_224",
+      "parameter_count_millions": 5.7,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 400,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "MAE-Lite MoCo-v3 ViT-Tiny 400e. Uses num_heads=12 (Hydra/timm DeiT-Tiny use 3); tensor shapes match but attention head_dim differs. Epoch budget 400 vs hydra-moco-vitt-e100 (100). Not an approved fair group."
+    },
+    {
+      "id": "mae-lite-mae-vitt-e400",
+      "source": "local",
+      "role": "comparator",
+      "vit_factory": "vit_tiny_h12",
+      "checkpoint": {
+        "path": "../weights/mae_tiny_400e.pth.tar",
+        "repository": "wangsr126/mae-lite",
+        "revision": null,
+        "sha256": "8717c64e24d14f406bf81fcdb5d3c318b94b29f7f3077762e737908a76262bf0",
+        "size_bytes": 23055981,
+        "layout": "checkpoint['model']; module.model.*; drop mask_token/decoder_*; encoder only",
+        "availability": "present",
+        "download_url": "https://drive.google.com/file/d/1ZQYlvCPLZrJDqn2lp4GCIVL246WPqgEf/view"
+      },
+      "method": "MAE (MAE-Lite)",
+      "architecture_id": "vit_tiny_patch16_224",
+      "parameter_count_millions": 5.7,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 400,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "MAE-Lite MAE ViT-Tiny 400e (encoder only). Same heads=12 caveat as mae-lite-mocov3-vitt-e400; MIM vs contrastive; 400e vs Hydra 100e. Not an approved fair group."
+    },
+    {
+      "id": "hydra-moco-vits-e300",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/Hydra_e300_IN1K_vits.pth",
+        "repository": "erow/Hydra",
+        "revision": "ae202d410bcd94e1574894b3342e41fff7b6c1ea",
+        "sha256": "83753942c73009e5778d796f48bfac12561c12aed015acdf6609d6e0b8f888eb",
+        "lfs_sha256": "83753942c73009e5778d796f48bfac12561c12aed015acdf6609d6e0b8f888eb",
+        "size_bytes": 89863918,
+        "layout": "raw state_dict; remove head.*",
+        "availability": "present"
+      },
+      "method": "Hydra-MoCo",
+      "architecture_id": "vit_small_patch16_224",
+      "parameter_count_millions": 22.1,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 300,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "hydra-moco-vitb-e300",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/Hydra_e300_IN1K_vitb.pth",
+        "repository": "erow/Hydra",
+        "revision": "ae202d410bcd94e1574894b3342e41fff7b6c1ea",
+        "sha256": "a51890c12b6d0da44d4cec03aeb2431fdc913fd94a57ac5cb309d02a4501e82c",
+        "lfs_sha256": "a51890c12b6d0da44d4cec03aeb2431fdc913fd94a57ac5cb309d02a4501e82c",
+        "size_bytes": 373722948,
+        "layout": "visual.* ViT backbone plus sibling projector/filter/logit_scale; strip visual. and remove visual.head.*",
+        "availability": "present"
+      },
+      "method": "Hydra-MoCo",
+      "architecture_id": "vit_base_patch16_224",
+      "parameter_count_millions": 86.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 300,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "hydra-v1-rn50-unspecified",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/HydraV1_resnet.pth",
+        "revision": null,
+        "sha256": null,
+        "layout": "visual.* prefix; remove visual.fc.* and non-visual modules",
+        "availability": "not_present_locally"
+      },
+      "method": "Hydra-MoCo v1",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": null,
+      "pretraining_epochs": null,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "evaluation_status": "excluded",
+      "exclusion_reason": "Pretraining data and budget are not documented."
+    },
+    {
+      "id": "hydra-rebuttal-rn50-unspecified",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/rebuttal_dp1.ckpt",
+        "revision": null,
+        "sha256": null,
+        "layout": "visual.* prefix; remove visual.fc.* and non-visual modules",
+        "availability": "not_present_locally"
+      },
+      "method": "Hydra-MoCo",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": null,
+      "pretraining_epochs": null,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "evaluation_status": "excluded",
+      "exclusion_reason": "Pretraining data and budget are not documented."
+    },
+    {
+      "id": "hydra-moco-vitb-mae-seeded",
+      "source": "local",
+      "role": "hydra",
+      "checkpoint": {
+        "path": "../weights/hydra-moco_bs4k_mae.pth",
+        "revision": null,
+        "sha256": null,
+        "layout": "module.base_encoder.* prefix; remove head.*",
+        "availability": "present"
+      },
+      "method": "Hydra-MoCo initialized from MAE weights",
+      "architecture_id": "vit_base_patch16_224",
+      "parameter_count_millions": 86.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": null,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "evaluation_status": "excluded",
+      "exclusion_reason": "Not published on erow/Hydra (ae202d410bcd94e1574894b3342e41fff7b6c1ea); total pretraining budget including MAE init remains undocumented. Prefer hydra-moco-vitb-e300 for fair ViT-B comparisons."
+    },
+    {
+      "id": "timm-sl-rn50",
+      "source": "timm",
+      "role": "comparator",
+      "checkpoint": {
+        "timm_model_name": "resnet50",
+        "timm_tag": "pretrained=True",
+        "path": "timm:resnet50",
+        "revision": null,
+        "sha256": null,
+        "layout": "timm.create_model(resnet50, pretrained=True, num_classes=0)",
+        "availability": "timm_pretrained"
+      },
+      "method": "SL (timm)",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": null,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Supervised ImageNet-1k reference from timm; epoch budget is not matched to SSL runs."
+    },
+    {
+      "id": "timm-sl-vitt",
+      "source": "timm",
+      "role": "comparator",
+      "checkpoint": {
+        "timm_model_name": "vit_tiny_patch16_224",
+        "timm_tag": "pretrained=True",
+        "path": "timm:vit_tiny_patch16_224",
+        "revision": null,
+        "sha256": null,
+        "layout": "timm.create_model(vit_tiny_patch16_224, pretrained=True, num_classes=0)",
+        "availability": "timm_pretrained"
+      },
+      "method": "SL (timm)",
+      "architecture_id": "vit_tiny_patch16_224",
+      "parameter_count_millions": 5.7,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": null,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Supervised ImageNet-1k ViT-Tiny reference from timm. No fair erow/SSL ViT-Tiny SSL comparator exists; use as SL baseline alongside hydra-moco-vitt-e100."
+    },
+    {
+      "id": "timm-sl-vits",
+      "source": "timm",
+      "role": "comparator",
+      "checkpoint": {
+        "timm_model_name": "vit_small_patch16_224",
+        "timm_tag": "pretrained=True",
+        "path": "timm:vit_small_patch16_224",
+        "revision": null,
+        "sha256": null,
+        "layout": "timm.create_model(vit_small_patch16_224, pretrained=True, num_classes=0)",
+        "availability": "timm_pretrained"
+      },
+      "method": "SL (timm)",
+      "architecture_id": "vit_small_patch16_224",
+      "parameter_count_millions": 22.1,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": null,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Supervised ImageNet-1k reference from timm; epoch budget is not matched to SSL runs."
+    },
+    {
+      "id": "timm-sl-vitb",
+      "source": "timm",
+      "role": "comparator",
+      "checkpoint": {
+        "timm_model_name": "vit_base_patch16_224",
+        "timm_tag": "pretrained=True",
+        "path": "timm:vit_base_patch16_224",
+        "revision": null,
+        "sha256": null,
+        "layout": "timm.create_model(vit_base_patch16_224, pretrained=True, num_classes=0)",
+        "availability": "timm_pretrained"
+      },
+      "method": "SL (timm)",
+      "architecture_id": "vit_base_patch16_224",
+      "parameter_count_millions": 86.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": null,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Supervised ImageNet-1k ViT-B reference from timm for architecture-matched vitb-e300 / MAE reports."
+    },
+    {
+      "id": "erow-mocov3-rn50-e1000",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/SSL",
+        "revision": "72d63866af2338351ac142c457c64f73eb1e2490",
+        "path": "resnet/mocov3_resnet50_e1000.pth",
+        "lfs_sha256": "9c89db04468fecd2b9a741e676480f7113cb449cd3bee113bce5e205558675ef",
+        "size_bytes": 94343634,
+        "layout": "not inspected; remote weights intentionally not downloaded",
+        "availability": "remote_only"
+      },
+      "method": "MoCo v3",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 1000,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "erow-barlow-twins-rn50-e1000",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/SSL",
+        "revision": "72d63866af2338351ac142c457c64f73eb1e2490",
+        "path": "resnet/BT_resnet50_e1000.pth",
+        "lfs_sha256": "dbb5cf1d3cd24f6157ecc56b161f1f9607b74c13c7132bf4e4570b81ba722e79",
+        "size_bytes": 94320556,
+        "layout": "not inspected; remote weights intentionally not downloaded",
+        "availability": "remote_only"
+      },
+      "method": "Barlow Twins",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 1000,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "erow-simclr-rn50-e1000",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/SSL",
+        "revision": "72d63866af2338351ac142c457c64f73eb1e2490",
+        "path": "resnet/simclr_resnet50_e1000.pth",
+        "lfs_sha256": "9be5042dbba62a826f2c9dbef2699cff79b588ad5feff063cd498bf63c07281a",
+        "size_bytes": 94346596,
+        "layout": "not inspected; remote weights intentionally not downloaded",
+        "availability": "remote_only"
+      },
+      "method": "SimCLR",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 1000,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "erow-simclr-rn50-bs4096-e1000",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/rn50_simclr_bs4096_e1000",
+        "revision": "3c4230798c5ec859fb7139937df096b8843ab5b1",
+        "path": "checkpoint.pth",
+        "local_path": "/scratch/u6gd/jw02425.u6gd/SimLAP/paper-p4-baselines/outputs/rn50_simclr_bs4096_e1000/checkpoint.pth",
+        "local_paths": [
+          "/parallel_scratch/jw02425/projects/SimLAP/weights/rn50_simclr_bs4096_e1000.pth"
+        ],
+        "layout": "checkpoint['model']; backbone.*; strip projector",
+        "availability": "present",
+        "source_experiment": "rn50_simclr_bs4096_e1000"
+      },
+      "method": "SimCLR",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 1000,
+      "batch_size": 4096,
+      "momentum_encoder": false,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Matched FastSSL SimCLR (LARS, lr=0.2, 4x1024). Hugging Face latest is epoch 965/1000: https://huggingface.co/erow/rn50_simclr_bs4096_e1000"
+    },
+    {
+      "id": "erow-supcon-rn50-bs4096-e1000",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/rn50_supcon_bs4096_e1000",
+        "revision": "0981fceeac03e7f5612b8e84f8a147f57f98cb5f",
+        "path": "checkpoint.pth",
+        "local_path": "/scratch/u6gd/jw02425.u6gd/SimLAP/paper-p4-baselines/outputs/rn50_supcon_bs4096_e1000/checkpoint.pth",
+        "local_paths": [
+          "/parallel_scratch/jw02425/projects/SimLAP/weights/rn50_supcon_bs4096_e1000.pth"
+        ],
+        "layout": "checkpoint['model']; backbone.*; strip projector/scale_logit",
+        "availability": "present",
+        "source_experiment": "rn50_supcon_bs4096_e1000"
+      },
+      "method": "SupCon",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 1000,
+      "batch_size": 4096,
+      "momentum_encoder": false,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Matched FastSSL SupCon as SimLAP identical+OpenGate. Hugging Face latest is epoch 840/1000: https://huggingface.co/erow/rn50_supcon_bs4096_e1000"
+    },
+    {
+      "id": "erow-gpaco-rn50-e400",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/SSL",
+        "revision": "72d63866af2338351ac142c457c64f73eb1e2490",
+        "path": "resnet/gpaco_resnet50_e400.pth",
+        "lfs_sha256": "81a21f01531d4e0d9b11ed0bf5f416dedd3db59b6ef52dd8352f1bdacd4af5b0",
+        "size_bytes": 94342990,
+        "layout": "not inspected; remote weights intentionally not downloaded",
+        "availability": "remote_only"
+      },
+      "method": "GPaCo",
+      "architecture_id": "resnet50",
+      "parameter_count_millions": 25.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 400,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "erow-mocov3-vits-e300",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/SSL",
+        "revision": "72d63866af2338351ac142c457c64f73eb1e2490",
+        "path": "vit/moco_vits_in1k.pth",
+        "lfs_sha256": "0d2a84a149714a8cb3e0c69c87d9a9178d6b8e67623e08abee8c49a1782ff5b4",
+        "size_bytes": 86709926,
+        "layout": "raw ViT state_dict (150 tensors); no head keys",
+        "availability": "remote_only"
+      },
+      "method": "MoCo v3",
+      "architecture_id": "vit_small_patch16_224",
+      "parameter_count_millions": 22.1,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 300,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated"
+    },
+    {
+      "id": "erow-mocov3-vitb-e300",
+      "source": "huggingface",
+      "role": "comparator",
+      "checkpoint": {
+        "repository": "erow/SSL",
+        "revision": "72d63866af2338351ac142c457c64f73eb1e2490",
+        "path": "vit/moco_vitb_in1k.pth",
+        "lfs_sha256": "842f237cebd0bd3594cf5849aac1dc4c713357be231fcef3064a9a236e08ae91",
+        "size_bytes": 343241894,
+        "layout": "raw ViT state_dict (150 tensors); no head keys",
+        "availability": "remote_only"
+      },
+      "method": "MoCo v3",
+      "architecture_id": "vit_base_patch16_224",
+      "parameter_count_millions": 86.6,
+      "pretraining_dataset": "ImageNet-1k",
+      "pretraining_epochs": 300,
+      "input_size": 224,
+      "preprocessing": "imagenet_eval_224",
+      "load_status": "unvalidated",
+      "notes": "Epoch count follows MoCo v3 ViT-B/16 IN1k recipe (300), matching hydra-moco-vitb-e300 and the existing mocov3-vits-e300 convention."
+    }
+  ],
+  "excluded_remote_models": [
+    {"path": "resnet/SimSiam_resnet50_e100.pth", "reason": "No local ResNet-50 Hydra checkpoint has a comparable known 100-epoch budget."},
+    {"path": "resnet/dino_resnet50_e800.pth", "reason": "No local ResNet-50 Hydra checkpoint meets the configured epoch-ratio rule."},
+    {"path": "resnet/supcon_resnet50_e600.pth", "reason": "No local ResNet-50 Hydra checkpoint meets the configured epoch-ratio rule."},
+    {"path": "vit/ibot_vits_in1k.pth", "reason": "Pretraining epoch count is absent from the pinned repository metadata."},
+    {"path": "vit/ibot_vitb_in1k.pth", "reason": "Pretraining epoch count is absent from the pinned repository metadata."},
+    {"path": "vit/ibot_vitb_in1krand.pth", "reason": "Pretraining epoch count is absent from the pinned repository metadata."},
+    {"path": "vit/ibot_vitl_in1krand.pth", "reason": "No local ViT-Large Hydra checkpoint exists."},
+    {"path": "vit/mcssl_vitb_in1k.pth", "reason": "Pretraining epoch count is absent from the pinned repository metadata."},
+    {"path": "vit/sit_vitb_in1k.pth", "reason": "Pretraining epoch count is absent from the pinned repository metadata."},
+    {"path": "vit/sit_vits_in1k.pth", "reason": "Pretraining epoch count is absent from the pinned repository metadata."}
+  ],
+  "approved_comparison_groups": [
+    {
+      "id": "rn50-e1000",
+      "architecture_id": "resnet50",
+      "hydra": ["simlap-v1-rn50-e1000", "simlap-v2-rn50-e1000"],
+      "comparators": [
+        "timm-sl-rn50",
+        "erow-mocov3-rn50-e1000",
+        "erow-barlow-twins-rn50-e1000",
+        "erow-simclr-rn50-e1000"
+      ]
+    },
+    {
+      "id": "rn50-e300-to-e400",
+      "architecture_id": "resnet50",
+      "hydra": ["hydra-moco-rn50-e300"],
+      "comparators": ["erow-gpaco-rn50-e400"],
+      "budget_ratio": 1.3333333333
+    },
+    {
+      "id": "vits-e300",
+      "architecture_id": "vit_small_patch16_224",
+      "hydra": ["hydra-moco-vits-e300"],
+      "comparators": ["timm-sl-vits", "erow-mocov3-vits-e300"]
+    },
+    {
+      "id": "vitb-e300",
+      "architecture_id": "vit_base_patch16_224",
+      "hydra": ["hydra-moco-vitb-e300"],
+      "comparators": ["timm-sl-vitb", "erow-mocov3-vitb-e300"]
+    }
+  ]
+}
