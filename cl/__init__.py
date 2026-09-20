@@ -1,4 +1,4 @@
-"""Two-view contrastive learners: SimCLR, SupCon, SimLAP (no momentum encoder)."""
+"""Two-view contrastive learners: SimCLR, SupCon, SimLAP, X-CLR (no momentum encoder)."""
 
 from cl.model import ContrastiveModel, build_model
 

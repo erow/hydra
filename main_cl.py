@@ -1,15 +1,25 @@
 #!/usr/bin/env python
-"""Train SimCLR / SupCon / SimLAP (no momentum encoder).
+"""Train SimCLR / SupCon / SimLAP / X-CLR (no momentum encoder).
 
-SimCLR defaults follow Chen et al. 2020 + google-research/simclr (ImageNet):
+SimCLR defaults follow Chen et al. 2020 ImageNet (paper §2 / Table 6):
   RN50, 2-layer projector 2048→128 + BN, NT-Xent τ=0.1, global BN,
-  LARS, base LR 0.3 × batch/256, wd 1e-6, warmup 10, cosine, 100 ep, bs 4096,
+  LARS, base LR 0.3 × batch/256 (= 4.8 at 4096), wd 1e-6, warmup 10, cosine,
+  100 ep (64.5% linear), 1000 ep is the 69.3% ResNet-50 row,
   crop (0.08,1), jitter 0.8/0.8/0.8/0.2 p=0.8, gray 0.2, blur p=0.5, flip.
 
-SupCon / SimLAP keep the paper no-momentum recipe (absolute LR 0.2, 3-layer 256-d).
-
+  # official: 4 GPU × 1024 = 4096
   python -m torch.distributed.run --nproc_per_node=4 main_cl.py \\
-      --method simclr --data /path/to/IN1K --output_dir /path/to/out
+      --method simclr --data "$IMAGENET_ROOT" --output_dir "$OUT"
+
+  # paper 69.3% row (1000 epoch)
+  python -m torch.distributed.run --nproc_per_node=4 main_cl.py \\
+      --method simclr --epochs 1000 --data "$IMAGENET_ROOT" --output_dir "$OUT"
+
+  # X-CLR (Sobal et al. ICLR 2025): 8 GPU × 128 = 1024, AutoAugment, τ_s=0.1
+  python -m torch.distributed.run --nproc_per_node=8 main_cl.py \\
+      --method xclr --data "$IMAGENET_ROOT" --output_dir "$OUT"
+
+SupCon / SimLAP keep the paper no-momentum recipe (absolute LR 0.2, 3-layer 256-d).
 """
 
 from __future__ import annotations
@@ -60,6 +70,25 @@ SIMCLR_RECIPE = dict(
     last_norm="bn",
     jitter=(0.8, 0.8, 0.8, 0.2),
 )
+# X-CLR ImageNet (Sobal et al. ICLR 2025 §4.1 / A.7): RN50, 2-layer 128-d,
+# LARS, 100 ep, bs 1024, absolute LR 0.075, AutoAugment, τ=τ_s=0.1.
+XCLR_RECIPE = dict(
+    batch_size=1024,
+    epochs=100,
+    lr=0.075,
+    scale_lr=False,
+    weight_decay=1e-6,
+    warmup_epochs=10,
+    dim=128,
+    mlp_dim=2048,
+    mlp_layers=2,
+    t=0.1,
+    t_s=0.1,
+    crop_min=0.08,
+    last_norm="bn",
+    jitter=(0.8, 0.8, 0.8, 0.2),
+    autoaugment=True,
+)
 # Paper tab:recipe (no momentum): SimCLR-aligned training for SupCon / SimLAP.
 PAPER_RECIPE = dict(
     batch_size=1024,
@@ -87,18 +116,19 @@ EVAL_TF = transforms.Compose(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="SimCLR / SupCon / SimLAP pre-training")
-    p.add_argument("--method", default="simclr", choices=["simclr", "supcon", "simlap"])
+    p = argparse.ArgumentParser(description="SimCLR / SupCon / SimLAP / X-CLR pre-training")
+    p.add_argument("--method", default="simclr", choices=["simclr", "supcon", "simlap", "xclr"])
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--debug", action="store_true")
     p.add_argument("--weights", default=None, type=str)
     p.add_argument("--data_set", default="IN1K", choices=["IN1K", "STL"])
     p.add_argument("--img_size", default=224, type=int)
-    p.add_argument("data", metavar="DIR", help="ImageNet root (train/) or STL10 root")
+    p.add_argument("--data", default=None, help="ImageNet root (contains train/) or STL10 root")
+    p.add_argument("data_dir", nargs="?", default=None, metavar="DIR", help="positional alias of --data")
     p.add_argument("-a", "--arch", default="resnet50")
     p.add_argument("-j", "--workers", default=8, type=int)
     p.add_argument("--epochs", default=None, type=int)
-    p.add_argument("--ckpt-freq", default=100, type=int)
+    p.add_argument("--ckpt-freq", default=50, type=int)
     p.add_argument("--start-epoch", default=0, type=int)
     p.add_argument("-b", "--batch-size", default=None, type=int, help="global batch")
     p.add_argument("--lr", default=None, type=float, help="SimCLR: base LR × batch/256; others: absolute")
@@ -115,6 +145,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mlp-dim", default=None, type=int)
     p.add_argument("--mlp-layers", default=None, type=int)
     p.add_argument("--t", default=None, type=float, help="softmax temperature")
+    p.add_argument("--t-s", default=None, type=float, dest="t_s", help="X-CLR graph softmax temperature")
+    p.add_argument("--xclr-graph", default=None, type=str, help="C×C class similarity .pt")
+    p.add_argument("--xclr-text-model", default=None, type=str, help="Sentence Transformer id for the graph")
     p.add_argument("--num-classes", default=1000, type=int)
     p.add_argument("--gate", default="basic", choices=["basic", "open"])
     p.add_argument("--last-norm", default=None, choices=["bn", "ln", "none"])
@@ -130,11 +163,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "hydra"))
     p.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY") or None)
     p.add_argument("--no-wandb", action="store_true")
-    return p.parse_args()
+    args = p.parse_args()
+    args.data = args.data or args.data_dir
+    if not args.data:
+        p.error("--data is required")
+    del args.data_dir
+    return args
 
 
 def apply_recipe(args: argparse.Namespace) -> None:
-    recipe = SIMCLR_RECIPE if args.method == "simclr" else PAPER_RECIPE
+    if args.method == "simclr":
+        recipe = SIMCLR_RECIPE
+    elif args.method == "xclr":
+        recipe = XCLR_RECIPE
+    else:
+        recipe = PAPER_RECIPE
     for key, value in recipe.items():
         if key in {"scale_lr", "jitter"}:
             continue
@@ -142,6 +185,8 @@ def apply_recipe(args: argparse.Namespace) -> None:
             setattr(args, key, value)
     args.scale_lr = recipe["scale_lr"]
     args.jitter = recipe["jitter"]
+    if "autoaugment" in recipe:
+        args.autoaugment = recipe["autoaugment"]
 
 
 def main() -> None:
@@ -186,11 +231,23 @@ def main_worker(args: argparse.Namespace) -> None:
 
     if args.data_set == "STL":
         args.num_classes = 10
+    extra = f" t_s={args.t_s}" if args.method == "xclr" else ""
     print(
         f"=> recipe {args.method} {args.arch} bs={args.batch_size} ep={args.epochs} "
         f"lr={args.lr}{'×bs/256' if args.scale_lr else ''} wd={args.weight_decay} "
-        f"warmup={args.warmup_epochs} dim={args.dim} layers={args.mlp_layers} t={args.t}"
+        f"warmup={args.warmup_epochs} dim={args.dim} layers={args.mlp_layers} t={args.t}{extra}"
     )
+    class_sim = None
+    if args.method == "xclr":
+        from cl.xclr_graph import class_names_for, offdiag_mean, resolve_class_sim
+
+        class_sim = resolve_class_sim(
+            args.num_classes,
+            names=class_names_for(args.data_set),
+            graph_path=args.xclr_graph,
+            text_model=args.xclr_text_model or "sentence-transformers/all-mpnet-base-v2",
+        )
+        print(f"=> xclr graph {tuple(class_sim.shape)} offdiag={offdiag_mean(class_sim):.3f}")
     model = build_model(
         args.arch,
         args.method,
@@ -202,6 +259,8 @@ def main_worker(args: argparse.Namespace) -> None:
         last_norm=args.last_norm,
         gate=args.gate,
         weights=args.weights,
+        tau_s=args.t_s if args.t_s is not None else 0.1,
+        class_sim=class_sim,
     )
     if args.scale_lr:
         args.lr = args.lr * args.batch_size / 256
@@ -224,18 +283,19 @@ def main_worker(args: argparse.Namespace) -> None:
         optimizer = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
     scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
     writer = SummaryWriter(args.output_dir) if args.rank == 0 and args.output_dir else None
-    if args.rank == 0 and args.output_dir and not args.no_wandb:
-        if wandb is None:
-            raise SystemExit("wandb is required to log loss; pip install wandb or pass --no-wandb")
-        wandb.init(
-            dir=args.output_dir,
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            config=vars(args),
-            job_type="train",
-            name=os.environ.get("WANDB_NAME"),
-            resume="allow" if args.resume else None,
-        )
+    if args.rank == 0 and args.output_dir and not args.no_wandb and wandb is not None:
+        try:
+            wandb.init(
+                dir=args.output_dir,
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                config=vars(args),
+                job_type="train",
+                name=os.environ.get("WANDB_NAME"),
+                resume="allow" if args.resume else None,
+            )
+        except Exception as exc:
+            print("=> wandb disabled:", exc)
 
     if args.resume and os.path.isfile(args.resume):
         loc = f"cuda:{args.gpu}" if args.gpu is not None else "cpu"
@@ -279,17 +339,20 @@ def main_worker(args: argparse.Namespace) -> None:
 
 def build_loader(args):
     normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-    aug = transforms.Compose(
-        [
-            transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.0)),
+    ops: list = [transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.0))]
+    if getattr(args, "autoaugment", False):
+        ops += [
+            transforms.RandomHorizontalFlip(),
+            transforms.AutoAugment(transforms.AutoAugmentPolicy.IMAGENET),
+        ]
+    else:
+        ops += [
             transforms.RandomApply([transforms.ColorJitter(*args.jitter)], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([moco.loader.GaussianBlur([0.1, 2.0])], p=0.5),
             transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
         ]
-    )
+    aug = transforms.Compose(ops + [transforms.ToTensor(), normalize])
     transform = moco.loader.MultiCropsTransform(aug, aug, num_crops=0)
     if args.data_set == "STL":
         dataset = datasets.STL10(args.data, split="train", download=True, transform=transform)
@@ -304,6 +367,7 @@ def build_loader(args):
         pin_memory=True,
         sampler=sampler,
         drop_last=True,
+        persistent_workers=args.workers > 0,
     )
     return loader, sampler
 
