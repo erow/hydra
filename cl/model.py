@@ -26,16 +26,19 @@ def build_backbone(arch: str, weights=None) -> nn.Module:
     return enc
 
 
-def build_projector(in_dim: int, hidden: int, out_dim: int, last_norm: str) -> nn.Sequential:
-    layers: list[nn.Module] = [
-        nn.Linear(in_dim, hidden, bias=False),
-        nn.BatchNorm1d(hidden),
-        nn.ReLU(inplace=True),
-        nn.Linear(hidden, hidden, bias=False),
-        nn.BatchNorm1d(hidden),
-        nn.ReLU(inplace=True),
-        nn.Linear(hidden, out_dim, bias=False),
-    ]
+def build_projector(
+    in_dim: int, hidden: int, out_dim: int, last_norm: str, num_layers: int = 3
+) -> nn.Sequential:
+    if num_layers < 1:
+        raise ValueError(f"num_layers={num_layers}")
+    layers: list[nn.Module] = []
+    for i in range(num_layers):
+        dim1 = in_dim if i == 0 else hidden
+        dim2 = out_dim if i == num_layers - 1 else hidden
+        layers.append(nn.Linear(dim1, dim2, bias=False))
+        if i < num_layers - 1:
+            layers.append(nn.BatchNorm1d(dim2))
+            layers.append(nn.ReLU(inplace=True))
     if last_norm == "bn":
         layers.append(nn.BatchNorm1d(out_dim, affine=False))
     elif last_norm == "ln":
@@ -52,6 +55,7 @@ class ContrastiveModel(nn.Module):
         method: str,
         dim: int = 256,
         mlp_dim: int = 2048,
+        num_layers: int | None = None,
         temperature: float = 0.1,
         num_classes: int = 1000,
         last_norm: str | None = None,
@@ -65,7 +69,9 @@ class ContrastiveModel(nn.Module):
         self.backbone = backbone
         if last_norm is None:
             last_norm = "ln" if method == "simlap" else "bn"
-        self.projector = build_projector(backbone.out_dim, mlp_dim, dim, last_norm)
+        if num_layers is None:
+            num_layers = 2 if method == "simclr" else 3
+        self.projector = build_projector(backbone.out_dim, mlp_dim, dim, last_norm, num_layers)
         self.filter = None
         if method == "simlap":
             from moco.filter import BasicGate, Filter, OpenGate

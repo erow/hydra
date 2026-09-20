@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 """Train SimCLR / SupCon / SimLAP (no momentum encoder).
 
+SimCLR defaults follow Chen et al. 2020 + google-research/simclr (ImageNet):
+  RN50, 2-layer projector 2048→128 + BN, NT-Xent τ=0.1, global BN,
+  LARS, base LR 0.3 × batch/256, wd 1e-6, warmup 10, cosine, 100 ep, bs 4096,
+  crop (0.08,1), jitter 0.8/0.8/0.8/0.2 p=0.8, gray 0.2, blur p=0.5, flip.
+
+SupCon / SimLAP keep the paper no-momentum recipe (absolute LR 0.2, 3-layer 256-d).
+
   python -m torch.distributed.run --nproc_per_node=4 main_cl.py \\
       --method simclr --data /path/to/IN1K --output_dir /path/to/out
-
-  Logs ``loss`` to wandb each step and ``eval/CF10`` (KNN k=10) every 100 epochs.
-
-  # single process (local smoke)
-  python main_cl.py --method simclr --data /path/to/IN1K --debug
 """
 
 from __future__ import annotations
@@ -42,6 +44,38 @@ except ImportError:
 
 KNN_K = 10
 KNN_T = 0.07
+# Official SimCLR ImageNet (Chen et al. 2020 §2 / google-research/simclr flags).
+SIMCLR_RECIPE = dict(
+    batch_size=4096,
+    epochs=100,
+    lr=0.3,
+    scale_lr=True,
+    weight_decay=1e-6,
+    warmup_epochs=10,
+    dim=128,
+    mlp_dim=2048,
+    mlp_layers=2,
+    t=0.1,
+    crop_min=0.08,
+    last_norm="bn",
+    jitter=(0.8, 0.8, 0.8, 0.2),
+)
+# Paper tab:recipe (no momentum): SimCLR-aligned training for SupCon / SimLAP.
+PAPER_RECIPE = dict(
+    batch_size=1024,
+    epochs=1000,
+    lr=0.2,
+    scale_lr=False,
+    weight_decay=1e-4,
+    warmup_epochs=40,
+    dim=256,
+    mlp_dim=2048,
+    mlp_layers=3,
+    t=0.1,
+    crop_min=0.08,
+    last_norm=None,
+    jitter=(0.4, 0.4, 0.4, 0.1),
+)
 EVAL_TF = transforms.Compose(
     [
         transforms.Resize(256),
@@ -63,23 +97,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("data", metavar="DIR", help="ImageNet root (train/) or STL10 root")
     p.add_argument("-a", "--arch", default="resnet50")
     p.add_argument("-j", "--workers", default=8, type=int)
-    p.add_argument("--epochs", default=1000, type=int)
+    p.add_argument("--epochs", default=None, type=int)
     p.add_argument("--ckpt-freq", default=100, type=int)
     p.add_argument("--start-epoch", default=0, type=int)
-    p.add_argument("-b", "--batch-size", default=1024, type=int, help="global batch")
-    p.add_argument("--lr", default=0.2, type=float, help="base LR; scaled by batch/256")
+    p.add_argument("-b", "--batch-size", default=None, type=int, help="global batch")
+    p.add_argument("--lr", default=None, type=float, help="SimCLR: base LR × batch/256; others: absolute")
     p.add_argument("--momentum", default=0.9, type=float)
-    p.add_argument("--wd", "--weight-decay", default=1e-4, type=float, dest="weight_decay")
+    p.add_argument("--wd", "--weight-decay", default=None, type=float, dest="weight_decay")
     p.add_argument("-p", "--print-freq", default=10, type=int)
     p.add_argument("--resume", default="", type=str)
     p.add_argument("--seed", default=None, type=int)
     p.add_argument("--gpu", default=None, type=int)
     p.add_argument("--optimizer", default="lars", choices=["lars", "adamw"])
-    p.add_argument("--warmup-epochs", default=40, type=int)
-    p.add_argument("--crop-min", default=0.08, type=float)
-    p.add_argument("--dim", default=256, type=int)
-    p.add_argument("--mlp-dim", default=2048, type=int)
-    p.add_argument("--t", default=0.1, type=float, help="softmax temperature")
+    p.add_argument("--warmup-epochs", default=None, type=int)
+    p.add_argument("--crop-min", default=None, type=float)
+    p.add_argument("--dim", default=None, type=int)
+    p.add_argument("--mlp-dim", default=None, type=int)
+    p.add_argument("--mlp-layers", default=None, type=int)
+    p.add_argument("--t", default=None, type=float, help="softmax temperature")
     p.add_argument("--num-classes", default=1000, type=int)
     p.add_argument("--gate", default="basic", choices=["basic", "open"])
     p.add_argument("--last-norm", default=None, choices=["bn", "ln", "none"])
@@ -98,8 +133,20 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def apply_recipe(args: argparse.Namespace) -> None:
+    recipe = SIMCLR_RECIPE if args.method == "simclr" else PAPER_RECIPE
+    for key, value in recipe.items():
+        if key in {"scale_lr", "jitter"}:
+            continue
+        if getattr(args, key, None) is None:
+            setattr(args, key, value)
+    args.scale_lr = recipe["scale_lr"]
+    args.jitter = recipe["jitter"]
+
+
 def main() -> None:
     args = parse_args()
+    apply_recipe(args)
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -139,19 +186,26 @@ def main_worker(args: argparse.Namespace) -> None:
 
     if args.data_set == "STL":
         args.num_classes = 10
-    print("=> creating", args.method, args.arch)
+    print(
+        f"=> recipe {args.method} {args.arch} bs={args.batch_size} ep={args.epochs} "
+        f"lr={args.lr}{'×bs/256' if args.scale_lr else ''} wd={args.weight_decay} "
+        f"warmup={args.warmup_epochs} dim={args.dim} layers={args.mlp_layers} t={args.t}"
+    )
     model = build_model(
         args.arch,
         args.method,
         dim=args.dim,
         mlp_dim=args.mlp_dim,
+        num_layers=args.mlp_layers,
         temperature=args.t,
         num_classes=args.num_classes,
         last_norm=args.last_norm,
         gate=args.gate,
         weights=args.weights,
     )
-    args.lr = args.lr * args.batch_size / 256
+    if args.scale_lr:
+        args.lr = args.lr * args.batch_size / 256
+    print("=> peak lr", args.lr)
 
     if args.distributed:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -228,7 +282,7 @@ def build_loader(args):
     aug = transforms.Compose(
         [
             transforms.RandomResizedCrop(args.img_size, scale=(args.crop_min, 1.0)),
-            transforms.RandomApply([transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)], p=0.8),
+            transforms.RandomApply([transforms.ColorJitter(*args.jitter)], p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.RandomApply([moco.loader.GaussianBlur([0.1, 2.0])], p=0.5),
             transforms.RandomHorizontalFlip(),
