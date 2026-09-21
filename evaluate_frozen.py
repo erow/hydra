@@ -17,8 +17,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import torch
+import torch.distributed as dist
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import datasets, models, transforms
 
 try:
@@ -408,10 +409,55 @@ def _dataloader_worker_init(_worker_id: int) -> None:
         pass
 
 
+def _selfcheck_split_and_trim() -> None:
+    """Stride split covers [0, N) once; pad-to-max then trim reconstructs."""
+    n, world = 10000, 16
+    parts = [list(range(rank, n, world)) for rank in range(world)]
+    assert sorted(i for p in parts for i in p) == list(range(n))
+    chunks = [torch.tensor(p) for p in parts]
+    counts = [c.numel() for c in chunks]
+    max_n = max(counts)
+    padded = [
+        torch.cat([c, c.new_zeros(max_n - c.numel())]) if c.numel() < max_n else c
+        for c in chunks
+    ]
+    out = torch.cat([p[:k] for p, k in zip(padded, counts)])
+    assert sorted(out.tolist()) == list(range(n))
+
+
+def _all_gather_cat(tensor: torch.Tensor) -> torch.Tensor:
+    """NCCL all_gather along dim0 when ranks hold different lengths."""
+    world = dist.get_world_size()
+    if world == 1:
+        return tensor
+    n = torch.tensor([tensor.size(0)], device=tensor.device, dtype=torch.long)
+    counts_t = [torch.zeros_like(n) for _ in range(world)]
+    dist.all_gather(counts_t, n)
+    counts = [int(x.item()) for x in counts_t]
+    max_n = max(counts)
+    if tensor.size(0) < max_n:
+        tensor = torch.cat(
+            [tensor, tensor.new_zeros((max_n - tensor.size(0),) + tensor.shape[1:])],
+            dim=0,
+        )
+    gathered = [torch.empty_like(tensor) for _ in range(world)]
+    dist.all_gather(gathered, tensor.contiguous())
+    return torch.cat([chunk[:c] for chunk, c in zip(gathered, counts)], dim=0)
+
+
+_selfcheck_split_and_trim()
+
+
 @torch.inference_mode()
 def extract_embeddings(
     model: nn.Module, dataset: Dataset, batch_size: int, device: torch.device, workers: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    use_dist = dist.is_available() and dist.is_initialized()
+    world = dist.get_world_size() if use_dist else 1
+    rank = dist.get_rank() if use_dist else 0
+    local_ds: Dataset = (
+        Subset(dataset, range(rank, len(dataset), world)) if use_dist else dataset
+    )
     pin_memory = device.type == "cuda"
     loader_kwargs: dict[str, Any] = {
         "batch_size": batch_size,
@@ -423,15 +469,16 @@ def extract_embeddings(
         loader_kwargs["persistent_workers"] = True
         loader_kwargs["prefetch_factor"] = 4
         loader_kwargs["worker_init_fn"] = _dataloader_worker_init
-    loader = DataLoader(dataset, **loader_kwargs)
+    loader = DataLoader(local_ds, **loader_kwargs)
     features: list[torch.Tensor] = []
     targets: list[torch.Tensor] = []
     model.to(device)
     model.eval()
     total = len(dataset)
+    local_n = len(local_ds)
     print(
-        f"extracting embeddings: n={total} batch_size={batch_size} "
-        f"workers={workers} pin_memory={pin_memory} device={device}",
+        f"extracting embeddings: n={total} local={local_n} world={world} "
+        f"batch_size={batch_size} workers={workers} pin_memory={pin_memory} device={device}",
         flush=True,
     )
     done = 0
@@ -443,15 +490,35 @@ def extract_embeddings(
             output = output[0]
         if output.ndim > 2:
             output = torch.flatten(output, 1)
-        features.append(output.detach().cpu().float())
-        targets.append(torch.as_tensor(labels).cpu().long())
+        features.append(output.detach().float())
+        targets.append(torch.as_tensor(labels, device=device).long())
         done += len(labels)
-        if done - last_report >= report_every or done >= total:
-            print(f"  embedding progress: {done}/{total}", flush=True)
+        if done - last_report >= report_every or done >= local_n:
+            print(f"  embedding progress: {done}/{local_n} (global {total})", flush=True)
             last_report = done
-    if not features:
+    if features:
+        local_f = torch.cat(features)
+        local_y = torch.cat(targets)
+        dim = local_f.size(1)
+    elif total == 0:
         raise EvaluationError("Dataset is empty; cannot extract embeddings")
-    return torch.cat(features), torch.cat(targets)
+    else:
+        local_f = local_y = None
+        dim = 0
+    if use_dist:
+        dim_t = torch.tensor([dim], device=device, dtype=torch.long)
+        dist.all_reduce(dim_t, op=dist.ReduceOp.MAX)
+        dim = int(dim_t.item())
+        if local_f is None:
+            local_f = torch.zeros(0, dim, device=device)
+            local_y = torch.zeros(0, dtype=torch.long, device=device)
+        local_f = _all_gather_cat(local_f)
+        local_y = _all_gather_cat(local_y)
+        if local_f.size(0) != total:
+            raise EvaluationError(f"gathered {local_f.size(0)} embeddings != {total}")
+    elif local_f is None:
+        raise EvaluationError("Dataset is empty; cannot extract embeddings")
+    return local_f.cpu(), local_y.cpu()
 
 
 def cache_key(record: dict[str, Any], dataset: str, split: str, transform: Any) -> str:

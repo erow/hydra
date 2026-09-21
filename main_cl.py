@@ -341,8 +341,11 @@ def main_worker(args: argparse.Namespace) -> None:
         args.start_epoch = ckpt["epoch"]
         model.load_state_dict(ckpt["state_dict"], strict=False)
         optimizer.load_state_dict(ckpt["optimizer"])
-        if "scaler" in ckpt:
-            scaler.load_state_dict(ckpt["scaler"])
+        saved_scaler = ckpt.get("scaler") or {}
+        if saved_scaler and scaler.is_enabled():
+            scaler.load_state_dict(saved_scaler)
+        elif saved_scaler or scaler.is_enabled():
+            print("=> skip scaler resume (fp32 ckpt ↔ fp16 run)")
         print("=> resumed", args.resume, "epoch", args.start_epoch)
 
     cudnn.benchmark = True
@@ -449,34 +452,37 @@ def evaluate_cifar10_knn(model, args) -> float:
     test_ds = build_dataset("cifar10", root, EVAL_TF, False, download=args.eval_download)
     train_f, train_y = extract_embeddings(enc.backbone, train_ds, args.eval_batch_size, device, args.workers)
     test_f, test_y = extract_embeddings(enc.backbone, test_ds, args.eval_batch_size, device, args.workers)
-    acc = knn_accuracy(
-        train_f,
-        train_y,
-        test_f,
-        test_y,
-        k=KNN_K,
-        temperature=KNN_T,
-        num_classes=10,
-        device=device,
-    )
-    return acc * 100.0
+    acc_t = torch.zeros(1, device=device)
+    if args.rank == 0:
+        acc_t[0] = knn_accuracy(
+            train_f,
+            train_y,
+            test_f,
+            test_y,
+            k=KNN_K,
+            temperature=KNN_T,
+            num_classes=10,
+            device=device,
+        ) * 100.0
+    if args.distributed:
+        dist.broadcast(acc_t, 0)
+    return float(acc_t)
 
 
 def evaluate_and_log(model, writer, epoch, step, args) -> None:
     model.eval()
-    if args.rank == 0:
-        from evaluate_frozen import EvaluationError
+    from evaluate_frozen import EvaluationError
 
-        print("=> CIFAR-10 KNN (k=10)")
-        try:
-            acc = evaluate_cifar10_knn(model, args)
-            print(f"=> eval/CF10 {acc:.2f} (epoch {epoch + 1})")
-            if writer:
-                writer.add_scalar("eval/CF10", acc, step)
-            if wandb is not None and wandb.run:
-                wandb.log({"eval/CF10": acc, "epoch": epoch + 1}, step=step)
-        except EvaluationError as exc:
-            print("=> skip eval/CF10:", exc)
+    print("=> CIFAR-10 KNN (k=10)")
+    try:
+        acc = evaluate_cifar10_knn(model, args)
+        print(f"=> eval/CF10 {acc:.2f} (epoch {epoch + 1})")
+        if writer:
+            writer.add_scalar("eval/CF10", acc, step)
+        if wandb is not None and wandb.run:
+            wandb.log({"eval/CF10": acc, "epoch": epoch + 1}, step=step)
+    except EvaluationError as exc:
+        print("=> skip eval/CF10:", exc)
     if args.distributed:
         dist.barrier()
     model.train()

@@ -617,7 +617,12 @@ def _prefer_triton(B: int, N: int, K: int, dtype: torch.dtype) -> bool:
     Triton is only ahead while the saved kernel launches and [B,N] passes
     dominate. With TF32 allowed both sides get tensor cores and the crossover
     moves up by ~10x. Beyond the crossover, fall back to ``torch``.
+
+    ROCm/MI250: GEMM tiles need ~144KB shared mem; gfx90a has 64KB (SimLAP
+    e100 job 22194946). Use the torch GEMM path there.
     """
+    if getattr(torch.version, "hip", None):
+        return False
     if dtype in (torch.float16, torch.bfloat16):
         return True
     limit = (
