@@ -45,7 +45,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import moco.loader
 from cl.imagenet import build_imagenet_dataset
-from cl.model import build_model
+from cl.model import build_model, keep_norm_fp32
 from moco.optimizer import LARS
 
 try:
@@ -177,6 +177,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--eval-batch-size", default=256, type=int)
     p.add_argument("--eval-download", action="store_true")
+    p.add_argument(
+        "--amp",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="fp16 AMP; --no-amp trains in fp32 (SimCLR on MI250)",
+    )
+    p.add_argument("--grad-ckpt", action="store_true", help="checkpoint ResNet stages (fp32 8×512)")
     p.add_argument("--wandb-project", default=os.environ.get("WANDB_PROJECT", "hydra"))
     p.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY") or None)
     p.add_argument("--no-wandb", action="store_true")
@@ -217,6 +224,10 @@ def main() -> None:
         cudnn.deterministic = True
         warnings.warn("CUDNN deterministic is on")
 
+    # LUMI /tmp and /dev/shm are the same tmpfs as the staged ImageNet.
+    # Default fd shm races on unlink under 8×8 workers (rank7 DataLoader crash).
+    if args.workers:
+        torch.multiprocessing.set_sharing_strategy("file_system")
     args.distributed = "RANK" in os.environ
     if args.distributed:
         args.rank = int(os.environ["RANK"])
@@ -228,7 +239,8 @@ def main() -> None:
             init_method="env://",
             world_size=args.world_size,
             rank=args.rank,
-            timeout=datetime.timedelta(seconds=300),
+            # Rank-0 CIFAR KNN holds the post-eval NCCL barrier past 5 min.
+            timeout=datetime.timedelta(seconds=1800),
         )
         dist.barrier()
         setup_for_distributed(args.rank == 0)
@@ -254,7 +266,8 @@ def main_worker(args: argparse.Namespace) -> None:
     print(
         f"=> recipe {args.method} {args.arch} bs={args.batch_size} ep={args.epochs} "
         f"lr={args.lr}{'×bs/256' if args.scale_lr else ''} wd={args.weight_decay} "
-        f"warmup={args.warmup_epochs} dim={args.dim} layers={args.mlp_layers} t={args.t}{extra}"
+        f"warmup={args.warmup_epochs} dim={args.dim} layers={args.mlp_layers} t={args.t} "
+        f"amp={args.amp} grad_ckpt={args.grad_ckpt}{extra}"
     )
     class_sim = None
     if args.method == "xclr":
@@ -285,6 +298,9 @@ def main_worker(args: argparse.Namespace) -> None:
         args.lr = args.lr * args.batch_size / 256
     print("=> peak lr", args.lr)
 
+    if args.grad_ckpt:
+        model.grad_ckpt = True
+        print("=> gradient checkpoint on ResNet stages")
     if args.distributed:
         model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
         torch.cuda.set_device(args.gpu)
@@ -295,12 +311,15 @@ def main_worker(args: argparse.Namespace) -> None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
     device = next(model.parameters()).device
+    use_amp = bool(args.amp) and device.type == "cuda"
+    if use_amp:
+        print(f"=> norm layers in fp32 ({keep_norm_fp32(model)})")
 
     if args.optimizer == "lars":
         optimizer = LARS(model.parameters(), args.lr, weight_decay=args.weight_decay, momentum=args.momentum)
     else:
         optimizer = torch.optim.AdamW(model.parameters(), args.lr, weight_decay=args.weight_decay)
-    scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     writer = SummaryWriter(args.output_dir) if args.rank == 0 and args.output_dir else None
     if args.rank == 0 and args.output_dir and not args.no_wandb and wandb is not None:
         try:
@@ -387,7 +406,7 @@ def build_loader(args):
         sampler=sampler,
         drop_last=True,
         persistent_workers=args.workers > 0,
-        prefetch_factor=3 if args.workers > 0 else None,
+        prefetch_factor=2 if args.workers > 0 else None,
     )
     return loader, sampler
 
@@ -479,7 +498,7 @@ def train(loader, model, optimizer, scaler, writer, epoch, args):
         data_time.update(time.time() - end)
         lr = adjust_learning_rate(optimizer, epoch + i / iters, args)
         lrs.update(lr)
-        with torch.cuda.amp.autocast(enabled=args.gpu is not None):
+        with torch.cuda.amp.autocast(enabled=scaler.is_enabled()):
             loss, log = model(images, targets)
         loss_val = loss.item()
         finite = torch.tensor(int(math.isfinite(loss_val)), device=loss.device)
