@@ -7,8 +7,36 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torchvision.models as torchvision_models
+from torch.nn.modules.batchnorm import _BatchNorm
 
 from cl.losses import nt_xent, simlap_loss, supcon, xclr
+
+_NORM = (_BatchNorm, nn.LayerNorm, nn.GroupNorm)
+
+
+def keep_norm_fp32(root: nn.Module) -> int:
+    """Keep BN/LN/GN compute + running stats in fp32 under autocast.
+
+    Autocast leaves buffers in fp32 but BN follows the incoming dtype (fp16
+    after conv). On ROCm that overflows running_mean/var. Call after
+    ``SyncBatchNorm.convert_sync_batchnorm``. Output stays fp32; the next
+    conv/linear recasts. Does not recover activations that are already Inf.
+    """
+    n = 0
+    for m in root.modules():
+        if not isinstance(m, _NORM) or getattr(m, "_fp32_norm", False):
+            continue
+        m.float()
+        inner = m.forward
+
+        def forward(x, *args, _inner=inner, **kwargs):
+            with torch.cuda.amp.autocast(enabled=False):
+                return _inner(x.float() if x.dtype != torch.float32 else x, *args, **kwargs)
+
+        m.forward = forward
+        m._fp32_norm = True
+        n += 1
+    return n
 
 
 def build_backbone(arch: str, weights=None) -> nn.Module:
@@ -87,12 +115,26 @@ class ContrastiveModel(nn.Module):
             if class_sim.shape != (num_classes, num_classes):
                 raise ValueError(f"class_sim {tuple(class_sim.shape)} != ({num_classes}, {num_classes})")
             self.register_buffer("class_sim", class_sim.detach().float().contiguous(), persistent=False)
+        self.grad_ckpt = False
+
+    def _forward_backbone(self, x: torch.Tensor) -> torch.Tensor:
+        bb = self.backbone
+        if not (self.training and self.grad_ckpt and hasattr(bb, "layer4")):
+            return bb(x)
+        from torch.utils.checkpoint import checkpoint
+
+        x = bb.maxpool(bb.relu(bb.bn1(bb.conv1(x))))
+        x = checkpoint(bb.layer1, x, use_reentrant=False)
+        x = checkpoint(bb.layer2, x, use_reentrant=False)
+        x = checkpoint(bb.layer3, x, use_reentrant=False)
+        x = checkpoint(bb.layer4, x, use_reentrant=False)
+        return torch.flatten(bb.avgpool(x), 1)
 
     def representation(self, x: torch.Tensor) -> torch.Tensor:
-        return self.backbone(x)
+        return self._forward_backbone(x)
 
     def project(self, x: torch.Tensor) -> torch.Tensor:
-        return self.projector(self.backbone(x))
+        return self.projector(self._forward_backbone(x))
 
     def forward(self, images, targets=None) -> tuple[torch.Tensor, dict[str, float]]:
         z1 = self.project(images[0])
@@ -126,3 +168,20 @@ class ContrastiveModel(nn.Module):
 def build_model(arch: str, method: str, **kwargs: Any) -> ContrastiveModel:
     weights = kwargs.pop("weights", None)
     return ContrastiveModel(build_backbone(arch, weights=weights), method, **kwargs)
+
+
+if __name__ == "__main__":
+    m = build_model("resnet18", "simclr", dim=16, mlp_dim=32, num_layers=2, last_norm="bn")
+    m.grad_ckpt = True
+    m.train()
+    x = torch.randn(2, 3, 56, 56)
+    z = m.project(x)
+    z.sum().backward()
+    assert z.shape == (2, 16) and torch.isfinite(z).all()
+    n = keep_norm_fp32(m)
+    assert n > 0
+    bn = next(mod for mod in m.modules() if isinstance(mod, nn.BatchNorm2d))
+    y = bn(torch.randn(2, bn.num_features, 8, 8, dtype=torch.float16))
+    assert y.dtype == torch.float32 and torch.isfinite(y).all()
+    assert bn.running_mean.dtype == torch.float32
+    print("ok grad_ckpt", tuple(z.shape), "fp32_norm", n)
