@@ -8,8 +8,8 @@ removes ImageNet classifiers, MoCo projectors, Hydra filters, and predictors.
 
 | Checkpoint | Backbone | Removed keys |
 | --- | --- | --- |
-| `HydraV1_e1000_IN1K_resnet.pth` | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | `fc.*` |
-| `HydraV2_e1000_IN1K_resnet.pth` | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | none |
+| `SimLAP_v1_e1000_IN1K_resnet.pth` (alias `HydraV1_e1000_…`) | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | `fc.*` |
+| `SimLAP_v2_e1000_IN1K_resnet.pth` (alias `HydraV2_e1000_…`) | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | none |
 | `Hydra_moco_e300_IN1K_resnet.pth` | ResNet-50: `conv1`, `bn1`, `layer1`–`layer4` | `fc.*` projector |
 | `HydraV1_resnet.pth`, `rebuttal_dp1.ckpt` | ResNet-50 under `visual.` | `visual.fc.*`, non-visual modules |
 | `Hydra_e100_IN1K_vitt.pth` | ViT-tiny: patch embedding, 12 blocks, `norm` | `head.*` |
@@ -115,7 +115,7 @@ After installing `requirements.txt`, a transfer run is:
 
 ```bash
 python evaluate_frozen.py \
-  --model hydra-v1-rn50-e1000 --dataset cifar10 \
+  --model simlap-v1-rn50-e1000 --dataset cifar10 \
   --data-root /path/to/datasets \
   --cache-dir ../results/ssl-representation-comparison/embeddings \
   --output ../results/ssl-representation-comparison/cifar10.json
@@ -134,7 +134,7 @@ probe:
 
 ```bash
 python evaluate_frozen.py --task imagenet-c \
-  --model hydra-v1-rn50-e1000 \
+  --model simlap-v1-rn50-e1000 \
   --imagenet-root /path/to/imagenet \
   --imagenet-c-root /path/to/imagenet-c
 ```

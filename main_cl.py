@@ -44,6 +44,7 @@ import torchvision.transforms as transforms
 from torch.utils.tensorboard import SummaryWriter
 
 import moco.loader
+from cl.imagenet import build_imagenet_dataset
 from cl.model import build_model
 from moco.optimizer import LARS
 
@@ -89,7 +90,23 @@ XCLR_RECIPE = dict(
     jitter=(0.8, 0.8, 0.8, 0.2),
     autoaugment=True,
 )
-# Paper tab:recipe (no momentum): SimCLR-aligned training for SupCon / SimLAP.
+# SupCon ImageNet: base LR 0.4 × batch/256, 8×512=4096, 350 ep, warmup 12, wd 1e-3.
+SUPCON_RECIPE = dict(
+    batch_size=4096,
+    epochs=350,
+    lr=0.4,
+    scale_lr=True,
+    weight_decay=1e-3,
+    warmup_epochs=12,
+    dim=256,
+    mlp_dim=2048,
+    mlp_layers=3,
+    t=0.1,
+    crop_min=0.08,
+    last_norm=None,
+    jitter=(0.4, 0.4, 0.4, 0.1),
+)
+# Paper tab:recipe (no momentum): SimLAP default (SupCon uses SUPCON_RECIPE).
 PAPER_RECIPE = dict(
     batch_size=1024,
     epochs=1000,
@@ -176,6 +193,8 @@ def apply_recipe(args: argparse.Namespace) -> None:
         recipe = SIMCLR_RECIPE
     elif args.method == "xclr":
         recipe = XCLR_RECIPE
+    elif args.method == "supcon":
+        recipe = SUPCON_RECIPE
     else:
         recipe = PAPER_RECIPE
     for key, value in recipe.items():
@@ -357,7 +376,7 @@ def build_loader(args):
     if args.data_set == "STL":
         dataset = datasets.STL10(args.data, split="train", download=True, transform=transform)
     else:
-        dataset = datasets.ImageFolder(os.path.join(args.data, "train"), transform=transform)
+        dataset = build_imagenet_dataset(args.data, split="train", transform=transform)
     sampler = torch.utils.data.distributed.DistributedSampler(dataset) if args.distributed else None
     loader = torch.utils.data.DataLoader(
         dataset,
@@ -368,6 +387,7 @@ def build_loader(args):
         sampler=sampler,
         drop_last=True,
         persistent_workers=args.workers > 0,
+        prefetch_factor=3 if args.workers > 0 else None,
     )
     return loader, sampler
 
@@ -461,7 +481,14 @@ def train(loader, model, optimizer, scaler, writer, epoch, args):
         lrs.update(lr)
         with torch.cuda.amp.autocast(enabled=args.gpu is not None):
             loss, log = model(images, targets)
-        losses.update(loss.item(), images[0].size(0))
+        loss_val = loss.item()
+        finite = torch.tensor(int(math.isfinite(loss_val)), device=loss.device)
+        if args.distributed:
+            dist.all_reduce(finite, op=dist.ReduceOp.MIN)
+        if finite.item() == 0:
+            print(f"=> abort non-finite loss at epoch {epoch} [{i}/{iters}]: {loss_val}")
+            raise SystemExit(2)
+        losses.update(loss_val, images[0].size(0))
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -470,7 +497,7 @@ def train(loader, model, optimizer, scaler, writer, epoch, args):
         end = time.time()
         if args.rank == 0:
             step = epoch * iters + i
-            payload = {"loss": loss.item(), "lr": lr, **log}
+            payload = {"loss": loss_val, "lr": lr, **log}
             if writer:
                 for k, v in payload.items():
                     writer.add_scalar(k, v, step)
