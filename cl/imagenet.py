@@ -1,4 +1,4 @@
-"""ImageNet-1k from ImageFolder or the HF parquet hub cache."""
+"""ImageNet-1k from LMDB, ImageFolder, or the HF parquet hub cache."""
 
 from __future__ import annotations
 
@@ -107,10 +107,93 @@ class ParquetImageNet:
         return img, label
 
 
+def find_lmdb(root: str | Path, split: str = "train") -> Path | None:
+    """LMDB env dir (contains data.mdb). LUMI-AI-Guide layout: train/ or train_images/."""
+    root = Path(root)
+    names = {
+        "train": ("train", "train_images"),
+        "val": ("val", "validation", "val_images"),
+        "validation": ("val", "validation", "val_images"),
+    }
+    for name in names.get(split, (split,)):
+        cand = root / name
+        if (cand / "data.mdb").is_file():
+            return cand
+    if (root / "data.mdb").is_file():
+        return root
+    return None
+
+
+class LmdbImageNet:
+    """Random-access JPEG LMDB (LUMI-AI-Guide / ImageFolderLMDB pickle records).
+
+    Values are pickle.dumps((jpeg_bytes, label)). Open lazily so DataLoader
+    workers do not inherit a forked env. lock=False / readahead=False is the
+    random-read recipe on Lustre.
+    """
+
+    def __init__(self, root: str | Path, transform=None):
+        import pickle
+
+        import lmdb
+
+        self.root = str(root)
+        self.transform = transform
+        self._env = None
+        env = lmdb.open(self.root, readonly=True, lock=False, readahead=False, meminit=False)
+        with env.begin(write=False) as txn:
+            raw_len = txn.get(b"__len__")
+            if raw_len is None:
+                raise FileNotFoundError(f"no __len__ in {self.root}")
+            self.length = int(pickle.loads(raw_len))
+            raw_keys = txn.get(b"__keys__")
+            self.keys = (
+                pickle.loads(raw_keys)
+                if raw_keys is not None
+                else [f"{i}".encode("ascii") for i in range(self.length)]
+            )
+        env.close()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_env"] = None
+        return state
+
+    def _open(self):
+        if self._env is None:
+            import lmdb
+
+            self._env = lmdb.open(
+                self.root, readonly=True, lock=False, readahead=False, meminit=False
+            )
+        return self._env
+
+    def __len__(self) -> int:
+        return self.length
+
+    def __getitem__(self, idx: int):
+        import pickle
+
+        from PIL import Image
+
+        with self._open().begin(write=False) as txn:
+            raw = txn.get(self.keys[idx])
+        if raw is None:
+            raise IndexError(idx)
+        jpeg, label = pickle.loads(raw)
+        img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, int(label)
+
+
 def build_imagenet_dataset(root: str | Path, split: str = "train", transform=None):
     from torchvision.datasets import ImageFolder
 
     root = Path(root)
+    lmdb_root = find_lmdb(root, split)
+    if lmdb_root is not None:
+        return LmdbImageNet(lmdb_root, transform=transform)
     folder = root / ("train" if split == "train" else "val")
     if folder.is_dir():
         return ImageFolder(folder, transform=transform)

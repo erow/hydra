@@ -135,6 +135,12 @@ EVAL_TF = transforms.Compose(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="SimCLR / SupCon / SimLAP / X-CLR pre-training")
     p.add_argument("--method", default="simclr", choices=["simclr", "supcon", "simlap", "xclr"])
+    p.add_argument(
+        "--recipe",
+        default=None,
+        choices=["simclr", "supcon", "xclr", "paper", "simlap"],
+        help="hyperparam bundle; default is the method's own recipe",
+    )
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--debug", action="store_true")
     p.add_argument("--weights", default=None, type=str)
@@ -196,11 +202,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def apply_recipe(args: argparse.Namespace) -> None:
-    if args.method == "simclr":
+    key = args.recipe or args.method
+    if key == "simclr":
         recipe = SIMCLR_RECIPE
-    elif args.method == "xclr":
+    elif key == "xclr":
         recipe = XCLR_RECIPE
-    elif args.method == "supcon":
+    elif key == "supcon":
         recipe = SUPCON_RECIPE
     else:
         recipe = PAPER_RECIPE
@@ -213,6 +220,11 @@ def apply_recipe(args: argparse.Namespace) -> None:
     args.jitter = recipe["jitter"]
     if "autoaugment" in recipe:
         args.autoaugment = recipe["autoaugment"]
+    if args.method == "simlap" and args.last_norm == "bn":
+        # Projector BN recenters each view on its own batch, so the shared
+        # direction disappears and z@sim falls to ~0. The gate needs LayerNorm
+        # (moco/builder.py: "BN will prevent gate close").
+        args.last_norm = "ln"
 
 
 def main() -> None:
@@ -266,7 +278,8 @@ def main_worker(args: argparse.Namespace) -> None:
     print(
         f"=> recipe {args.method} {args.arch} bs={args.batch_size} ep={args.epochs} "
         f"lr={args.lr}{'×bs/256' if args.scale_lr else ''} wd={args.weight_decay} "
-        f"warmup={args.warmup_epochs} dim={args.dim} layers={args.mlp_layers} t={args.t} "
+        f"warmup={args.warmup_epochs} dim={args.dim} layers={args.mlp_layers} "
+        f"norm={args.last_norm} t={args.t} "
         f"amp={args.amp} grad_ckpt={args.grad_ckpt}{extra}"
     )
     class_sim = None
@@ -450,8 +463,8 @@ def evaluate_cifar10_knn(model, args) -> float:
     enc = model.module if isinstance(model, nn.parallel.DistributedDataParallel) else model
     train_ds = build_dataset("cifar10", root, EVAL_TF, True, download=args.eval_download)
     test_ds = build_dataset("cifar10", root, EVAL_TF, False, download=args.eval_download)
-    train_f, train_y = extract_embeddings(enc.backbone, train_ds, args.eval_batch_size, device, args.workers)
-    test_f, test_y = extract_embeddings(enc.backbone, test_ds, args.eval_batch_size, device, args.workers)
+    train_f, train_y = extract_embeddings(enc.backbone, train_ds, args.eval_batch_size, device, 0)
+    test_f, test_y = extract_embeddings(enc.backbone, test_ds, args.eval_batch_size, device, 0)
     acc_t = torch.zeros(1, device=device)
     if args.rank == 0:
         acc_t[0] = knn_accuracy(
@@ -493,7 +506,10 @@ def train(loader, model, optimizer, scaler, writer, epoch, args):
     data_time = AverageMeter("Data", ":6.3f")
     lrs = AverageMeter("LR", ":.4e")
     losses = AverageMeter("Loss", ":.4e")
-    progress = ProgressMeter(len(loader), [batch_time, data_time, lrs, losses], prefix=f"Epoch: [{epoch}]")
+    zsim = AverageMeter("z@sim", ":6.3f")
+    progress = ProgressMeter(
+        len(loader), [batch_time, data_time, lrs, losses, zsim], prefix=f"Epoch: [{epoch}]"
+    )
     model.train()
     end = time.time()
     iters = max(len(loader), 1)
@@ -514,6 +530,8 @@ def train(loader, model, optimizer, scaler, writer, epoch, args):
             print(f"=> abort non-finite loss at epoch {epoch} [{i}/{iters}]: {loss_val}")
             raise SystemExit(2)
         losses.update(loss_val, images[0].size(0))
+        if "z@sim" in log:
+            zsim.update(log["z@sim"], images[0].size(0))
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.step(optimizer)

@@ -409,6 +409,13 @@ def _dataloader_worker_init(_worker_id: int) -> None:
         pass
 
 
+def _pad_to_n(tensor: torch.Tensor, n: int) -> torch.Tensor:
+    extra = n - tensor.size(0)
+    if extra <= 0:
+        return tensor
+    return torch.cat([tensor, tensor.new_zeros((extra,) + tensor.shape[1:])], 0)
+
+
 def _selfcheck_split_and_trim() -> None:
     """Stride split covers [0, N) once; pad-to-max then trim reconstructs."""
     n, world = 10000, 16
@@ -417,12 +424,14 @@ def _selfcheck_split_and_trim() -> None:
     chunks = [torch.tensor(p) for p in parts]
     counts = [c.numel() for c in chunks]
     max_n = max(counts)
-    padded = [
-        torch.cat([c, c.new_zeros(max_n - c.numel())]) if c.numel() < max_n else c
-        for c in chunks
-    ]
+    padded = [_pad_to_n(c, max_n) for c in chunks]
     out = torch.cat([p[:k] for p, k in zip(padded, counts)])
     assert sorted(out.tolist()) == list(range(n))
+    leftover = torch.arange(6).reshape(3, 2)
+    padded_b = _pad_to_n(leftover, 5)
+    assert padded_b.shape == (5, 2) and torch.equal(padded_b[:3], leftover)
+    assert torch.equal(padded_b[3:], padded_b.new_zeros(2, 2))
+    assert _pad_to_n(leftover, 3) is leftover
 
 
 def _all_gather_cat(tensor: torch.Tensor) -> torch.Tensor:
@@ -434,12 +443,7 @@ def _all_gather_cat(tensor: torch.Tensor) -> torch.Tensor:
     counts_t = [torch.zeros_like(n) for _ in range(world)]
     dist.all_gather(counts_t, n)
     counts = [int(x.item()) for x in counts_t]
-    max_n = max(counts)
-    if tensor.size(0) < max_n:
-        tensor = torch.cat(
-            [tensor, tensor.new_zeros((max_n - tensor.size(0),) + tensor.shape[1:])],
-            dim=0,
-        )
+    tensor = _pad_to_n(tensor, max(counts))
     gathered = [torch.empty_like(tensor) for _ in range(world)]
     dist.all_gather(gathered, tensor.contiguous())
     return torch.cat([chunk[:c] for chunk, c in zip(gathered, counts)], dim=0)
@@ -458,7 +462,11 @@ def extract_embeddings(
     local_ds: Dataset = (
         Subset(dataset, range(rank, len(dataset), world)) if use_dist else dataset
     )
-    pin_memory = device.type == "cuda"
+    # DDP eval while the train loader still holds persistent workers: extra
+    # forks deadlock on LUMI /dev/shm (same tmpfs as staged ImageNet).
+    if use_dist:
+        workers = 0
+    pin_memory = device.type == "cuda" and workers > 0
     loader_kwargs: dict[str, Any] = {
         "batch_size": batch_size,
         "shuffle": False,
@@ -483,14 +491,17 @@ def extract_embeddings(
     )
     done = 0
     last_report = 0
-    report_every = max(batch_size * 20, 1)
+    report_every = max(min(batch_size * 4, max(local_n, 1)), 1)
     for images, labels in loader:
-        output = model(images.to(device, non_blocking=pin_memory))
+        # Keep N == batch_size. A leftover 53/113-wide batch is a new MIOpen
+        # Find key; with cudnn.benchmark that search has run ~1h on MI250.
+        n = images.size(0)
+        output = model(_pad_to_n(images, batch_size).to(device, non_blocking=pin_memory))
         if isinstance(output, (tuple, list)):
             output = output[0]
         if output.ndim > 2:
             output = torch.flatten(output, 1)
-        features.append(output.detach().float())
+        features.append(output[:n].detach().float())
         targets.append(torch.as_tensor(labels, device=device).long())
         done += len(labels)
         if done - last_report >= report_every or done >= local_n:

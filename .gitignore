@@ -4,7 +4,7 @@ outputs
 __pycache__/
 *.py[cod]
 *$py.class
-
+core
 # C extensions
 *.so
 

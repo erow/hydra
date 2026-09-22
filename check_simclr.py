@@ -37,6 +37,24 @@ def check_cli() -> None:
     )
     assert args.epochs == 1000 and args.batch_size == 4096
 
+    args = _parse(
+        [
+            "--method",
+            "simlap",
+            "--recipe",
+            "simclr",
+            "--data",
+            "/tmp/IN1K",
+            "--output_dir",
+            "/tmp/out",
+        ]
+    )
+    assert args.batch_size == 4096 and args.scale_lr and args.dim == 128
+    assert args.mlp_layers == 2 and args.last_norm == "ln"
+    assert args.warmup_epochs == 10 and args.weight_decay == 1e-6
+    assert args.jitter == (0.8, 0.8, 0.8, 0.2)
+    assert abs(args.lr * args.batch_size / 256 - 4.8) < 1e-9
+
 
 def check_model() -> None:
     model = build_model("resnet50", "simclr", dim=128, mlp_dim=2048, num_layers=2, last_norm="bn")
