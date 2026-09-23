@@ -151,7 +151,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("-a", "--arch", default="resnet50")
     p.add_argument("-j", "--workers", default=8, type=int)
     p.add_argument("--epochs", default=None, type=int)
-    p.add_argument("--ckpt-freq", default=50, type=int)
+    p.add_argument("--ckpt-freq", default=10, type=int)
     p.add_argument("--start-epoch", default=0, type=int)
     p.add_argument("-b", "--batch-size", default=None, type=int, help="global batch")
     p.add_argument("--lr", default=None, type=float, help="SimCLR: base LR × batch/256; others: absolute")
